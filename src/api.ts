@@ -1,14 +1,17 @@
-import type { Projekt, Uzytkownik, Historyjka } from './types';
+import type { Projekt, Uzytkownik, Historyjka, Zadanie } from './types';
 
 const PROJECTS_KEY = 'manageme_projects';
 const STORIES_KEY = 'manageme_stories';
+const TASKS_KEY = 'manageme_tasks';
 const ACTIVE_PROJECT_KEY = 'manageme_active_project';
 
-export const mockUser: Uzytkownik = {
-  id: 'user-1',
-  imie: 'Jan',
-  nazwisko: 'Kowalski',
-};
+export const mockUsers: Uzytkownik[] = [
+  { id: 'user-1', imie: 'Jan', nazwisko: 'Kowalski', rola: 'admin' },
+  { id: 'user-2', imie: 'Adam', nazwisko: 'Nowak', rola: 'developer' },
+  { id: 'user-3', imie: 'Marta', nazwisko: 'Wisła', rola: 'devops' },
+];
+
+export const mockUser = mockUsers[0]; // Admin by default
 
 export const getActiveProjectId = (): string | null => {
   return localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -85,6 +88,10 @@ export class StoryService {
     return this.getStoriesFromStorage().filter((s) => s.projektId === projectId);
   }
 
+  getById(id: string): Historyjka | undefined {
+    return this.getStoriesFromStorage().find((s) => s.id === id);
+  }
+
   create(story: Omit<Historyjka, 'id' | 'dataUtworzenia'>): Historyjka {
     const stories = this.getStoriesFromStorage();
     const newStory: Historyjka = {
@@ -112,7 +119,96 @@ export class StoryService {
     const filteredStories = stories.filter((s) => s.id !== id);
     this.saveStoriesToStorage(filteredStories);
   }
+
+  updateState(id: string, newState: 'todo' | 'doing' | 'done'): void {
+    const story = this.getById(id);
+    if (story) {
+      this.update({ ...story, stan: newState });
+    }
+  }
+}
+
+export class TaskService {
+  private getTasksFromStorage(): Zadanie[] {
+    const data = localStorage.getItem(TASKS_KEY);
+    return data ? JSON.parse(data) : [];
+  }
+
+  private saveTasksToStorage(tasks: Zadanie[]): void {
+    localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
+  }
+
+  getAllForStory(storyId: string): Zadanie[] {
+    return this.getTasksFromStorage().filter((t) => t.historyjkaId === storyId);
+  }
+
+  getById(id: string): Zadanie | undefined {
+    return this.getTasksFromStorage().find((t) => t.id === id);
+  }
+
+  create(task: Omit<Zadanie, 'id' | 'dataDodania'>): Zadanie {
+    const tasks = this.getTasksFromStorage();
+    const newTask: Zadanie = {
+      ...task,
+      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+      dataDodania: new Date().toISOString(),
+    };
+    tasks.push(newTask);
+    this.saveTasksToStorage(tasks);
+    return newTask;
+  }
+
+  update(updatedTask: Zadanie): Zadanie {
+    const tasks = this.getTasksFromStorage();
+    const index = tasks.findIndex((t) => t.id === updatedTask.id);
+    if (index === -1) return updatedTask;
+
+    const oldTask = tasks[index];
+    const finalTask = { ...updatedTask };
+
+    // Business Logic: Assigning user (devops/developer) to a 'todo' task
+    if (finalTask.wlascicielId && finalTask.stan === 'todo' && oldTask.stan === 'todo') {
+      const user = mockUsers.find(u => u.id === finalTask.wlascicielId);
+      if (user && (user.rola === 'developer' || user.rola === 'devops')) {
+        finalTask.stan = 'doing';
+        finalTask.dataStartu = new Date().toISOString();
+        
+        // Propagate to Story
+        const story = storyService.getById(finalTask.historyjkaId);
+        if (story && story.stan === 'todo') {
+          storyService.updateState(story.id, 'doing');
+        }
+      }
+    }
+
+    // Business Logic: Changing state to 'done'
+    if (finalTask.stan === 'done' && oldTask.stan !== 'done') {
+      finalTask.dataZakonczenia = new Date().toISOString();
+      
+      // Propagate to Story if all tasks are done
+      setTimeout(() => {
+        const allStoryTasks = this.getAllForStory(finalTask.historyjkaId);
+        const otherTasks = allStoryTasks.filter(t => t.id !== finalTask.id);
+        const allDone = otherTasks.every(t => t.stan === 'done');
+        
+        if (allDone) {
+          storyService.updateState(finalTask.historyjkaId, 'done');
+        }
+      }, 0);
+    }
+
+    tasks[index] = finalTask;
+    this.saveTasksToStorage(tasks);
+    return finalTask;
+  }
+
+  delete(id: string): void {
+    const tasks = this.getTasksFromStorage();
+    const filteredTasks = tasks.filter((t) => t.id !== id);
+    this.saveTasksToStorage(filteredTasks);
+  }
 }
 
 export const projectService = new ProjectService();
 export const storyService = new StoryService();
+export const taskService = new TaskService();
