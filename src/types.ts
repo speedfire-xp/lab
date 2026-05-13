@@ -4,13 +4,15 @@ export interface Projekt {
   opis: string;
 }
 
-export type Rola = 'admin' | 'devops' | 'developer';
+export type Rola = 'admin' | 'devops' | 'developer' | 'gość';
 
 export interface Uzytkownik {
   id: string;
   imie: string;
   nazwisko: string;
   rola: Rola;
+  email: string;
+  czyZablokowany: boolean;
 }
 
 export interface Historyjka {

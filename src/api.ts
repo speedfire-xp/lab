@@ -1,18 +1,14 @@
-import type { Projekt, Uzytkownik, Historyjka, Zadanie, Powiadomienie } from './types';
+import type { Projekt, Uzytkownik, Historyjka, Zadanie, Powiadomienie, Rola } from './types';
 
 const PROJECTS_KEY = 'manageme_projects';
 const STORIES_KEY = 'manageme_stories';
 const TASKS_KEY = 'manageme_tasks';
 const NOTIFICATIONS_KEY = 'manageme_notifications';
+const USERS_KEY = 'manageme_users';
+const LOGGED_USER_KEY = 'manageme_logged_user';
 const ACTIVE_PROJECT_KEY = 'manageme_active_project';
 
-export const mockUsers: Uzytkownik[] = [
-  { id: 'user-1', imie: 'Jan', nazwisko: 'Kowalski', rola: 'admin' },
-  { id: 'user-2', imie: 'Adam', nazwisko: 'Nowak', rola: 'developer' },
-  { id: 'user-3', imie: 'Marta', nazwisko: 'Wisła', rola: 'devops' },
-];
-
-export const mockUser = mockUsers[0]; // Admin by default
+const SUPER_ADMIN_EMAIL = 'speedfirexp@gmail.com'; // Zmień na swój e-mail
 
 export const getActiveProjectId = (): string | null => {
   return localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -39,6 +35,95 @@ class NotificationEmitter {
   }
 }
 export const notificationEmitter = new NotificationEmitter();
+
+export class UserService {
+  getAll(): Uzytkownik[] {
+    const data = localStorage.getItem(USERS_KEY);
+    return data ? JSON.parse(data) : [];
+  }
+
+  private saveAll(users: Uzytkownik[]): void {
+    localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  }
+
+  getByEmail(email: string): Uzytkownik | undefined {
+    return this.getAll().find(u => u.email === email);
+  }
+
+  create(user: Uzytkownik): void {
+    const users = this.getAll();
+    users.push(user);
+    this.saveAll(users);
+
+    // Notify admins about new user
+    this.getAll().filter(u => u.rola === 'admin').forEach(admin => {
+      notificationService.create({
+        tytul: 'Nowe konto w systemie',
+        tresc: `Zarejestrowano nowego użytkownika: ${user.email}`,
+        priorytet: 'high',
+        odbiorcaId: admin.id
+      });
+    });
+  }
+
+  updateRole(userId: string, role: Rola): void {
+    const users = this.getAll();
+    const index = users.findIndex(u => u.id === userId);
+    if (index !== -1) {
+      users[index].rola = role;
+      this.saveAll(users);
+    }
+  }
+
+  toggleBlock(userId: string): void {
+    const users = this.getAll();
+    const index = users.findIndex(u => u.id === userId);
+    if (index !== -1) {
+      users[index].czyZablokowany = !users[index].czyZablokowany;
+      this.saveAll(users);
+    }
+  }
+}
+
+export const userService = new UserService();
+
+export class AuthService {
+  getLoggedUser(): Uzytkownik | null {
+    const data = sessionStorage.getItem(LOGGED_USER_KEY);
+    if (!data) return null;
+    const user = JSON.parse(data);
+    // Sync with DB (e.g. if blocked or role changed)
+    const dbUser = userService.getByEmail(user.email);
+    return dbUser || null;
+  }
+
+  login(googleProfile: { email: string; given_name: string; family_name: string }): Uzytkownik {
+    const email = googleProfile.email;
+    let user = userService.getByEmail(email);
+
+    if (!user) {
+      const newUser: Uzytkownik = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+        imie: googleProfile.given_name,
+        nazwisko: googleProfile.family_name,
+        email: email,
+        rola: email === SUPER_ADMIN_EMAIL ? 'admin' : 'gość',
+        czyZablokowany: false
+      };
+      userService.create(newUser);
+      user = newUser;
+    }
+
+    sessionStorage.setItem(LOGGED_USER_KEY, JSON.stringify(user));
+    return user;
+  }
+
+  logout(): void {
+    sessionStorage.removeItem(LOGGED_USER_KEY);
+  }
+}
+
+export const authService = new AuthService();
 
 export class NotificationService {
   private getNotificationsFromStorage(): Powiadomienie[] {
@@ -122,7 +207,7 @@ export class ProjectService {
     this.saveProjectsToStorage(projects);
 
     // Notification Logic: New project for all admins
-    mockUsers.filter(u => u.rola === 'admin').forEach(admin => {
+    userService.getAll().filter(u => u.rola === 'admin').forEach(admin => {
       notificationService.create({
         tytul: 'Nowy Projekt',
         tresc: `Utworzono nowy projekt: ${newProject.nazwa}`,
@@ -273,7 +358,7 @@ export class TaskService {
 
     // Business Logic: Assigning user (devops/developer) to a 'todo' task
     if (finalTask.wlascicielId && finalTask.stan === 'todo' && oldTask.stan === 'todo') {
-      const user = mockUsers.find(u => u.id === finalTask.wlascicielId);
+      const user = userService.getAll().find(u => u.id === finalTask.wlascicielId);
       if (user && (user.rola === 'developer' || user.rola === 'devops')) {
         finalTask.stan = 'doing';
         finalTask.dataStartu = new Date().toISOString();

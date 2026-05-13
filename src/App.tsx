@@ -1,19 +1,31 @@
 import { useState, useMemo, useEffect } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
-import type { Projekt, Historyjka, Zadanie, Powiadomienie } from './types';
+import { GoogleLogin, googleLogout, type CredentialResponse } from '@react-oauth/google';
+import { jwtDecode } from 'jwt-decode';
+import type { Projekt, Historyjka, Zadanie, Powiadomienie, Uzytkownik, Rola } from './types';
 import { 
   projectService, 
   storyService, 
   taskService, 
   notificationService,
   notificationEmitter,
-  mockUsers, 
-  mockUser, 
+  authService,
+  userService,
   getActiveProjectId, 
   setActiveProjectId 
 } from './api';
 
+interface GoogleProfile {
+  email: string;
+  given_name: string;
+  family_name: string;
+  sub: string;
+}
+
 function App() {
+  // Auth state
+  const [loggedUser, setLoggedUser] = useState<Uzytkownik | null>(authService.getLoggedUser());
+
   // Theme state
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('manageme_theme');
@@ -53,11 +65,20 @@ function App() {
   const [taskCzas, setTaskCzas] = useState(1);
 
   // Notification state
-  const [notifications, setNotifications] = useState<Powiadomienie[]>(notificationService.getAllForUser(mockUser.id));
-  const [unreadCount, setUnreadCount] = useState(notificationService.getUnreadCount(mockUser.id));
-  const [view, setView] = useState<'board' | 'notifications'>('board');
+  const [notifications, setNotifications] = useState<Powiadomienie[]>(
+    loggedUser ? notificationService.getAllForUser(loggedUser.id) : []
+  );
+  const [unreadCount, setUnreadCount] = useState(
+    loggedUser ? notificationService.getUnreadCount(loggedUser.id) : 0
+  );
+  const [view, setView] = useState<'board' | 'notifications' | 'admin'>('board');
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Powiadomienie[]>([]);
+
+  // Admin state
+  const [allUsers, setAllUsers] = useState<Uzytkownik[]>(
+    loggedUser?.rola === 'admin' ? userService.getAll() : []
+  );
 
   useEffect(() => {
     if (darkMode) {
@@ -72,11 +93,10 @@ function App() {
   // Real-time notifications listener
   useEffect(() => {
     const unsubscribe = notificationEmitter.subscribe((n) => {
-      if (n.odbiorcaId === mockUser.id) {
+      if (loggedUser && n.odbiorcaId === loggedUser.id) {
         setNotifications(prev => [n, ...prev]);
         setUnreadCount(prev => prev + 1);
         
-        // Show toast for medium and high priority
         if (n.priorytet === 'medium' || n.priorytet === 'high') {
           setToasts(prev => [...prev, n]);
           setTimeout(() => {
@@ -86,7 +106,7 @@ function App() {
       }
     });
     return unsubscribe;
-  }, []);
+  }, [loggedUser]);
 
   const refreshProjects = () => {
     setProjects(projectService.getAll());
@@ -103,8 +123,39 @@ function App() {
   };
 
   const refreshNotifications = () => {
-    setNotifications(notificationService.getAllForUser(mockUser.id));
-    setUnreadCount(notificationService.getUnreadCount(mockUser.id));
+    if (loggedUser) {
+      setNotifications(notificationService.getAllForUser(loggedUser.id));
+      setUnreadCount(notificationService.getUnreadCount(loggedUser.id));
+    }
+  };
+
+  const refreshUsers = () => {
+    setAllUsers(userService.getAll());
+  };
+
+  // Auth handlers
+  const handleLoginSuccess = (credentialResponse: CredentialResponse) => {
+    if (credentialResponse.credential) {
+      const profile = jwtDecode<GoogleProfile>(credentialResponse.credential);
+      const user = authService.login(profile);
+      setLoggedUser(user);
+      setView('board');
+      setNotifications(notificationService.getAllForUser(user.id));
+      setUnreadCount(notificationService.getUnreadCount(user.id));
+      if (user.rola === 'admin') setAllUsers(userService.getAll());
+    }
+  };
+
+  const handleLogout = () => {
+    googleLogout();
+    authService.logout();
+    setLoggedUser(null);
+    setView('board');
+    setActiveProjectIdState(null);
+    setActiveProjectId(null);
+    setNotifications([]);
+    setUnreadCount(0);
+    setAllUsers([]);
   };
 
   // Project handlers
@@ -122,6 +173,7 @@ function App() {
     setNazwa('');
     setOpis('');
     refreshProjects();
+    if (loggedUser?.rola === 'admin') refreshUsers(); // Users might have received notification
   };
 
   const handleProjectEdit = (p: Projekt) => {
@@ -159,7 +211,7 @@ function App() {
   // Story handlers
   const handleStorySubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!storyNazwa.trim() || !activeProjectId) return;
+    if (!storyNazwa.trim() || !activeProjectId || !loggedUser) return;
 
     if (editingStoryId) {
       const existing = stories.find(s => s.id === editingStoryId);
@@ -180,7 +232,7 @@ function App() {
         priorytet: storyPriorytet,
         stan: storyStan,
         projektId: activeProjectId,
-        wlascicielId: mockUser.id,
+        wlascicielId: loggedUser.id,
       });
     }
 
@@ -270,16 +322,21 @@ function App() {
   };
 
   // Notification handlers
-  const handleMarkAsRead = (id: string, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    notificationService.markAsRead(id);
-    refreshNotifications();
-  };
-
   const handleNotificationClick = (id: string) => {
     setSelectedNotificationId(id);
     notificationService.markAsRead(id);
     refreshNotifications();
+  };
+
+  // Admin handlers
+  const handleUpdateUserRole = (userId: string, role: Rola) => {
+    userService.updateRole(userId, role);
+    refreshUsers();
+  };
+
+  const handleToggleBlock = (userId: string) => {
+    userService.toggleBlock(userId);
+    refreshUsers();
   };
 
   // Memoized data
@@ -295,26 +352,93 @@ function App() {
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
   const selectedNotification = useMemo(() => notifications.find(n => n.id === selectedNotificationId), [notifications, selectedNotificationId]);
 
+  // Conditional Rendering for Login/Auth states
+  if (!loggedUser) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 ${darkMode ? 'dark' : ''}`}>
+        <div className="bg-white dark:bg-slate-800 p-12 rounded-3xl shadow-2xl text-center max-w-md w-full border border-slate-100 dark:border-slate-700">
+          <h1 className="text-4xl font-black text-indigo-600 mb-6">ManageMe</h1>
+          <p className="text-slate-500 mb-10">Zaloguj się, aby zarządzać swoimi projektami</p>
+          <div className="flex justify-center">
+            <GoogleLogin onSuccess={handleLoginSuccess} onError={() => console.log('Login Failed')} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loggedUser.czyZablokowany) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 ${darkMode ? 'dark' : ''}`}>
+        <div className="bg-white dark:bg-slate-800 p-12 rounded-3xl shadow-2xl text-center max-w-md w-full border-t-8 border-red-500">
+          <span className="text-6xl mb-6 block">🚫</span>
+          <h1 className="text-2xl font-black mb-4">Konto Zablokowane</h1>
+          <p className="text-slate-500 mb-8">Twoje konto zostało zablokowane przez administratora.</p>
+          <button onClick={handleLogout} className="text-indigo-600 font-bold hover:underline">Wyloguj</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (loggedUser.rola === 'gość') {
+    return (
+      <div className={`min-h-screen bg-slate-50 dark:bg-slate-900 ${darkMode ? 'dark' : ''}`}>
+        <div className="max-w-4xl mx-auto p-8">
+          <div className="flex justify-between items-center mb-12">
+            <h1 className="text-3xl font-black text-indigo-600">ManageMe</h1>
+            <button onClick={handleLogout} className="px-4 py-2 bg-slate-200 dark:bg-slate-700 rounded-lg font-bold text-sm">Wyloguj</button>
+          </div>
+          <div className="bg-white dark:bg-slate-800 p-12 rounded-3xl shadow-xl text-center border-l-8 border-amber-500">
+            <span className="text-6xl mb-6 block">⏳</span>
+            <h1 className="text-2xl font-black mb-4">Oczekiwanie na zatwierdzenie</h1>
+            <p className="text-slate-500">Twoje konto zostało zarejestrowane jako <span className="font-bold text-amber-600">gość</span>. Musisz poczekać, aż administrator przypisze Ci odpowiednią rolę (developer, devops lub admin), aby uzyskać dostęp do aplikacji.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 transition-colors duration-200 p-4 md:p-8 ${darkMode ? 'dark' : ''}`}>
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-8">
           <div className="flex items-center gap-4">
-            <div className="text-sm font-medium bg-white dark:bg-slate-800 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
-              Zalogowany: <span className="text-indigo-600 dark:text-indigo-400">{mockUser.imie} {mockUser.nazwisko}</span> ({mockUser.rola})
+            <div className="text-sm font-medium bg-white dark:bg-slate-800 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm flex items-center gap-3">
+              <span className="text-indigo-600 dark:text-indigo-400 font-bold">{loggedUser.imie} {loggedUser.nazwisko}</span>
+              <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-700 rounded text-[10px] uppercase font-black">{loggedUser.rola}</span>
+              <button onClick={handleLogout} className="ml-2 text-slate-400 hover:text-red-500 transition-colors" title="Wyloguj">🚪</button>
             </div>
-            <button 
-              onClick={() => setView(view === 'board' ? 'notifications' : 'board')}
-              className="relative p-2 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-              title="Powiadomienia"
-            >
-              <span className="text-xl">🔔</span>
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-black w-5 h-5 flex items-center justify-center rounded-full animate-bounce">
-                  {unreadCount}
-                </span>
+            
+            <nav className="flex gap-2">
+              <button 
+                onClick={() => setView('board')}
+                className={`p-2 rounded-lg border transition-all ${view === 'board' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:bg-slate-50'}`}
+                title="Tablica"
+              >
+                📊
+              </button>
+              <button 
+                onClick={() => setView('notifications')}
+                className={`relative p-2 rounded-lg border transition-all ${view === 'notifications' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:bg-slate-50'}`}
+                title="Powiadomienia"
+              >
+                🔔
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-black w-5 h-5 flex items-center justify-center rounded-full animate-bounce shadow-lg">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+              {loggedUser.rola === 'admin' && (
+                <button 
+                  onClick={() => setView('admin')}
+                  className={`p-2 rounded-lg border transition-all ${view === 'admin' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 hover:bg-slate-50'}`}
+                  title="Zarządzanie Użytkownikami"
+                >
+                  👥
+                </button>
               )}
-            </button>
+            </nav>
           </div>
           <button 
             onClick={() => setDarkMode(!darkMode)}
@@ -325,16 +449,59 @@ function App() {
           </button>
         </div>
 
-        {view === 'notifications' ? (
+        {view === 'admin' && loggedUser.rola === 'admin' ? (
+          <section className="animate-in fade-in duration-500">
+            <h2 className="text-3xl font-black mb-8">Zarządzanie Użytkownikami</h2>
+            <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl overflow-hidden border border-slate-200 dark:border-slate-700">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-slate-50 dark:bg-slate-900/50">
+                    <tr>
+                      <th className="px-6 py-4 font-black uppercase text-xs text-slate-500">Użytkownik</th>
+                      <th className="px-6 py-4 font-black uppercase text-xs text-slate-500">Email</th>
+                      <th className="px-6 py-4 font-black uppercase text-xs text-slate-500">Rola</th>
+                      <th className="px-6 py-4 font-black uppercase text-xs text-slate-500 text-right">Akcje</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                    {allUsers.map(u => (
+                      <tr key={u.id} className={u.czyZablokowany ? 'bg-red-50/50 dark:bg-red-900/10 grayscale-[0.5]' : ''}>
+                        <td className="px-6 py-4 font-bold">{u.imie} {u.nazwisko}</td>
+                        <td className="px-6 py-4 text-sm text-slate-500">{u.email}</td>
+                        <td className="px-6 py-4">
+                          <select 
+                            value={u.rola} 
+                            onChange={(e) => handleUpdateUserRole(u.id, e.target.value as Rola)}
+                            className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                          >
+                            <option value="admin">Admin</option>
+                            <option value="developer">Developer</option>
+                            <option value="devops">DevOps</option>
+                            <option value="gość">Gość</option>
+                          </select>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button 
+                            onClick={() => handleToggleBlock(u.id)}
+                            className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${
+                              u.czyZablokowany ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200' : 'bg-red-100 text-red-600 hover:bg-red-200'
+                            }`}
+                          >
+                            {u.czyZablokowany ? 'ODBLOKUJ' : 'BLOKUJ'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        ) : view === 'notifications' ? (
           <section className="animate-in fade-in duration-500">
             <div className="flex items-center justify-between mb-8">
               <h2 className="text-3xl font-black">Twoje Powiadomienia</h2>
-              <button 
-                onClick={() => setView('board')}
-                className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg shadow-md hover:bg-indigo-700 transition-colors"
-              >
-                Powrót do tablicy
-              </button>
+              <button onClick={() => { notificationService.markAllAsRead(loggedUser.id); refreshNotifications(); }} className="text-xs font-black text-indigo-600 hover:underline">OZNACZ WSZYSTKIE JAKO PRZECZYTANE</button>
             </div>
 
             {notifications.length === 0 ? (
@@ -362,14 +529,6 @@ function App() {
                       <span className="text-xs text-slate-400 font-medium">{new Date(n.data).toLocaleString()}</span>
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2">{n.tresc}</p>
-                    {!n.czyPrzeczytane && (
-                      <button 
-                        onClick={(e) => handleMarkAsRead(n.id, e)}
-                        className="mt-4 text-xs font-black text-indigo-600 dark:text-indigo-400 hover:underline"
-                      >
-                        OZNACZ JAKO PRZECZYTANE
-                      </button>
-                    )}
                   </div>
                 ))}
               </div>
@@ -581,7 +740,7 @@ function Column({ title, items, onSelect, selectedId, onEdit, onDelete, isTask, 
               {isTask && 'wlascicielId' in item && item.wlascicielId && (
                 <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 bg-slate-50 dark:bg-slate-700/50 px-2 py-1 rounded-full border border-slate-200 dark:border-slate-600">
                   <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                  {mockUsers.find(u => u.id === (item as Zadanie).wlascicielId)?.imie}
+                  {userService.getAll().find(u => u.id === (item as Zadanie).wlascicielId)?.imie}
                 </div>
               )}
             </div>
@@ -605,8 +764,9 @@ interface TaskDetailsProps {
 }
 
 function TaskDetails({ task, storyName, onClose, onAssign, onComplete }: TaskDetailsProps) {
-  const assignableUsers = mockUsers.filter(u => u.rola === 'developer' || u.rola === 'devops');
-  const assignedUser = mockUsers.find(u => u.id === task.wlascicielId);
+  const allUsers = userService.getAll();
+  const assignableUsers = allUsers.filter(u => (u.rola === 'developer' || u.rola === 'devops') && !u.czyZablokowany);
+  const assignedUser = allUsers.find(u => u.id === task.wlascicielId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-300" onClick={onClose}>
