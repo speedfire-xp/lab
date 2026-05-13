@@ -1,10 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
-import type { Projekt, Historyjka, Zadanie } from './types';
+import type { Projekt, Historyjka, Zadanie, Powiadomienie } from './types';
 import { 
   projectService, 
   storyService, 
   taskService, 
+  notificationService,
+  notificationEmitter,
   mockUsers, 
   mockUser, 
   getActiveProjectId, 
@@ -50,6 +52,13 @@ function App() {
   const [taskPriorytet, setTaskPriorytet] = useState<'niski' | 'średni' | 'wysoki'>('niski');
   const [taskCzas, setTaskCzas] = useState(1);
 
+  // Notification state
+  const [notifications, setNotifications] = useState<Powiadomienie[]>(notificationService.getAllForUser(mockUser.id));
+  const [unreadCount, setUnreadCount] = useState(notificationService.getUnreadCount(mockUser.id));
+  const [view, setView] = useState<'board' | 'notifications'>('board');
+  const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Powiadomienie[]>([]);
+
   useEffect(() => {
     if (darkMode) {
       document.documentElement.classList.add('dark');
@@ -59,6 +68,25 @@ function App() {
       localStorage.setItem('manageme_theme', 'light');
     }
   }, [darkMode]);
+
+  // Real-time notifications listener
+  useEffect(() => {
+    const unsubscribe = notificationEmitter.subscribe((n) => {
+      if (n.odbiorcaId === mockUser.id) {
+        setNotifications(prev => [n, ...prev]);
+        setUnreadCount(prev => prev + 1);
+        
+        // Show toast for medium and high priority
+        if (n.priorytet === 'medium' || n.priorytet === 'high') {
+          setToasts(prev => [...prev, n]);
+          setTimeout(() => {
+            setToasts(prev => prev.filter(t => t.id !== n.id));
+          }, 5000);
+        }
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   const refreshProjects = () => {
     setProjects(projectService.getAll());
@@ -72,6 +100,11 @@ function App() {
   const refreshTasks = (storyId: string) => {
     setTasks(taskService.getAllForStory(storyId));
     if (activeProjectId) refreshStories(activeProjectId);
+  };
+
+  const refreshNotifications = () => {
+    setNotifications(notificationService.getAllForUser(mockUser.id));
+    setUnreadCount(notificationService.getUnreadCount(mockUser.id));
   };
 
   // Project handlers
@@ -236,6 +269,19 @@ function App() {
     }
   };
 
+  // Notification handlers
+  const handleMarkAsRead = (id: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    notificationService.markAsRead(id);
+    refreshNotifications();
+  };
+
+  const handleNotificationClick = (id: string) => {
+    setSelectedNotificationId(id);
+    notificationService.markAsRead(id);
+    refreshNotifications();
+  };
+
   // Memoized data
   const todoStories = useMemo(() => stories.filter(s => s.stan === 'todo'), [stories]);
   const doingStories = useMemo(() => stories.filter(s => s.stan === 'doing'), [stories]);
@@ -247,13 +293,28 @@ function App() {
 
   const selectedStory = useMemo(() => stories.find(s => s.id === selectedStoryId), [stories, selectedStoryId]);
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
+  const selectedNotification = useMemo(() => notifications.find(n => n.id === selectedNotificationId), [notifications, selectedNotificationId]);
 
   return (
     <div className={`min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 transition-colors duration-200 p-4 md:p-8 ${darkMode ? 'dark' : ''}`}>
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-8">
-          <div className="text-sm font-medium bg-white dark:bg-slate-800 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
-            Zalogowany: <span className="text-indigo-600 dark:text-indigo-400">{mockUser.imie} {mockUser.nazwisko}</span> ({mockUser.rola})
+          <div className="flex items-center gap-4">
+            <div className="text-sm font-medium bg-white dark:bg-slate-800 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm">
+              Zalogowany: <span className="text-indigo-600 dark:text-indigo-400">{mockUser.imie} {mockUser.nazwisko}</span> ({mockUser.rola})
+            </div>
+            <button 
+              onClick={() => setView(view === 'board' ? 'notifications' : 'board')}
+              className="relative p-2 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+              title="Powiadomienia"
+            >
+              <span className="text-xl">🔔</span>
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-black w-5 h-5 flex items-center justify-center rounded-full animate-bounce">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
           </div>
           <button 
             onClick={() => setDarkMode(!darkMode)}
@@ -264,137 +325,192 @@ function App() {
           </button>
         </div>
 
-        <header className="mb-12 text-center">
-          <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-purple-600 mb-2">ManageMe</h1>
-          <p className="text-slate-500 dark:text-slate-400">Twoje centrum zarządzania projektami</p>
-        </header>
-
-        <section className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-700 mb-8">
-          <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-            {editingProjectId ? '✏️ Edytuj projekt' : '🚀 Dodaj nowy projekt'}
-          </h2>
-          <form onSubmit={handleProjectSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-1">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Nazwa</label>
-              <input 
-                type="text" 
-                value={nazwa} 
-                onChange={(e) => setNazwa(e.target.value)} 
-                className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                required 
-              />
-            </div>
-            <div className="space-y-1 md:col-span-2 flex gap-4">
-              <div className="flex-1 space-y-1">
-                <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Opis</label>
-                <input 
-                  type="text" 
-                  value={opis} 
-                  onChange={(e) => setOpis(e.target.value)} 
-                  className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-                />
-              </div>
-              <div className="flex items-end gap-2">
-                <button type="submit" className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-lg shadow-indigo-200 dark:shadow-none transition-all">
-                  {editingProjectId ? 'Zapisz' : 'Dodaj'}
-                </button>
-                {editingProjectId && (
-                  <button type="button" className="px-3 py-2 bg-slate-200 dark:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg" onClick={() => setEditingProjectId(null)}>✕</button>
-                )}
-              </div>
-            </div>
-          </form>
-        </section>
-
-        <section className="flex flex-col md:flex-row items-center gap-4 bg-white dark:bg-slate-800 p-4 rounded-xl shadow-md border border-slate-200 dark:border-slate-700 mb-8">
-          <label className="text-sm font-bold whitespace-nowrap">Wybrany projekt:</label>
-          <select 
-            value={activeProjectId || ''} 
-            onChange={handleActiveProjectChange}
-            className="w-full md:w-auto flex-1 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
-          >
-            <option value="">-- Wybierz projekt z listy --</option>
-            {projects.map(p => <option key={p.id} value={p.id}>{p.nazwa}</option>)}
-          </select>
-        </section>
-
-        {activeProjectId ? (
-          <main className="space-y-12 animate-in fade-in duration-500">
-            <section className="bg-indigo-50 dark:bg-indigo-900/20 p-6 rounded-2xl border border-indigo-100 dark:border-indigo-800/50">
-              <h3 className="text-lg font-bold mb-4">{editingStoryId ? '📝 Edycja historyjki' : '✨ Nowa historyjka'}</h3>
-              <form onSubmit={handleStorySubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <input placeholder="Nazwa" value={storyNazwa} onChange={(e) => setStoryNazwa(e.target.value)} required className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500" />
-                <select value={storyPriorytet} onChange={(e) => setStoryPriorytet(e.target.value as 'niski' | 'średni' | 'wysoki')} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500">
-                  <option value="niski">Niski priorytet</option><option value="średni">Średni priorytet</option><option value="wysoki">Wysoki priorytet</option>
-                </select>
-                <input placeholder="Opis" value={storyOpis} onChange={(e) => setStoryOpis(e.target.value)} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500 md:col-span-1" />
-                <div className="flex gap-2">
-                  <button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-md transition-all">{editingStoryId ? 'Zapisz' : 'Dodaj'}</button>
-                  {editingStoryId && <button type="button" className="px-4 bg-slate-200 dark:bg-slate-700 rounded-lg" onClick={resetStoryForm}>Anuluj</button>}
-                </div>
-              </form>
-            </section>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <Column title="To Do" items={todoStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-slate-100 dark:bg-slate-800/50" />
-              <Column title="In Progress" items={doingStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-blue-50 dark:bg-blue-900/10" />
-              <Column title="Done" items={doneStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-emerald-50 dark:bg-emerald-900/10" />
+        {view === 'notifications' ? (
+          <section className="animate-in fade-in duration-500">
+            <div className="flex items-center justify-between mb-8">
+              <h2 className="text-3xl font-black">Twoje Powiadomienia</h2>
+              <button 
+                onClick={() => setView('board')}
+                className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-lg shadow-md hover:bg-indigo-700 transition-colors"
+              >
+                Powrót do tablicy
+              </button>
             </div>
 
-            {selectedStoryId && selectedStory && (
-              <section className="mt-16 pt-16 border-t-2 border-slate-200 dark:border-slate-800 animate-in slide-in-from-bottom-8 duration-500">
-                <div className="flex items-center justify-between mb-8">
-                  <h2 className="text-3xl font-black">Zadania: <span className="text-indigo-600 dark:text-indigo-400">{selectedStory.nazwa}</span></h2>
-                </div>
-                
-                <div className="bg-slate-100 dark:bg-slate-800/50 p-6 rounded-2xl mb-8">
-                  <h3 className="text-sm font-bold uppercase tracking-widest text-slate-500 mb-4">➕ Nowe zadanie operacyjne</h3>
-                  <form onSubmit={handleTaskSubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <input placeholder="Nazwa zadania" value={taskNazwa} onChange={(e) => setTaskNazwa(e.target.value)} required className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500" />
-                    <select value={taskPriorytet} onChange={(e) => setTaskPriorytet(e.target.value as 'niski' | 'średni' | 'wysoki')} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500">
-                      <option value="niski">Niski priorytet</option><option value="średni">Średni priorytet</option><option value="wysoki">Wysoki priorytet</option>
-                    </select>
-                    <div className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="text-xs font-bold text-slate-400 uppercase">Godz:</span>
-                      <input type="number" min="1" value={taskCzas} onChange={(e) => setTaskCzas(parseInt(e.target.value))} className="w-full bg-transparent outline-none font-bold" />
-                    </div>
-                    <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-lg">Utwórz zadanie</button>
-                  </form>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                  <Column title="Zadania: Do zrobienia" items={todoTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-slate-100 dark:bg-slate-800/50" />
-                  <Column title="Zadania: W trakcie" items={doingTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-amber-50 dark:bg-amber-900/10" />
-                  <Column title="Zadania: Zakończone" items={doneTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-emerald-50 dark:bg-emerald-900/10" />
-                </div>
-              </section>
-            )}
-          </main>
-        ) : (
-          <section className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
-            <h2 className="text-2xl font-bold mb-6">Wszystkie Projekty</h2>
-            {projects.length === 0 ? (
-              <div className="text-center py-12 bg-slate-50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-700">
-                <p className="text-slate-500">Brak aktywnych projektów. Stwórz swój pierwszy projekt powyżej!</p>
+            {notifications.length === 0 ? (
+              <div className="text-center py-20 bg-white dark:bg-slate-800 rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700">
+                <p className="text-slate-500">Brak powiadomień.</p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {projects.map((p) => (
-                  <div key={p.id} className="group relative bg-slate-50 dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-indigo-500 transition-all hover:shadow-xl">
-                    <h3 className="text-xl font-bold mb-2 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{p.nazwa}</h3>
-                    <p className="text-slate-500 dark:text-slate-400 text-sm line-clamp-3 mb-6">{p.opis}</p>
-                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button className="flex-1 py-1.5 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-md text-sm font-bold" onClick={() => handleProjectEdit(p)}>Edytuj</button>
-                      <button className="flex-1 py-1.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-md text-sm font-bold" onClick={() => handleProjectDelete(p.id)}>Usuń</button>
+              <div className="space-y-4">
+                {notifications.map((n) => (
+                  <div 
+                    key={n.id} 
+                    onClick={() => handleNotificationClick(n.id)}
+                    className={`p-6 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border-l-4 transition-all cursor-pointer hover:shadow-md ${
+                      !n.czyPrzeczytane ? 'border-indigo-500' : 'border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="flex items-center gap-3">
+                        <span className={`w-2 h-2 rounded-full ${
+                          n.priorytet === 'high' ? 'bg-red-500' : 
+                          n.priorytet === 'medium' ? 'bg-amber-500' : 'bg-emerald-500'
+                        }`}></span>
+                        <h3 className={`font-bold ${!n.czyPrzeczytane ? 'text-indigo-600 dark:text-indigo-400' : ''}`}>{n.tytul}</h3>
+                      </div>
+                      <span className="text-xs text-slate-400 font-medium">{new Date(n.data).toLocaleString()}</span>
                     </div>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2">{n.tresc}</p>
+                    {!n.czyPrzeczytane && (
+                      <button 
+                        onClick={(e) => handleMarkAsRead(n.id, e)}
+                        className="mt-4 text-xs font-black text-indigo-600 dark:text-indigo-400 hover:underline"
+                      >
+                        OZNACZ JAKO PRZECZYTANE
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             )}
           </section>
+        ) : (
+          <>
+            <header className="mb-12 text-center">
+              <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-purple-600 mb-2">ManageMe</h1>
+              <p className="text-slate-500 dark:text-slate-400">Twoje centrum zarządzania projektami</p>
+            </header>
+
+            <section className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-700 mb-8">
+              <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
+                {editingProjectId ? '✏️ Edytuj projekt' : '🚀 Dodaj nowy projekt'}
+              </h2>
+              <form onSubmit={handleProjectSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Nazwa</label>
+                  <input 
+                    type="text" 
+                    value={nazwa} 
+                    onChange={(e) => setNazwa(e.target.value)} 
+                    className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    required 
+                  />
+                </div>
+                <div className="space-y-1 md:col-span-2 flex gap-4">
+                  <div className="flex-1 space-y-1">
+                    <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Opis</label>
+                    <input 
+                      type="text" 
+                      value={opis} 
+                      onChange={(e) => setOpis(e.target.value)} 
+                      className="w-full px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+                  <div className="flex items-end gap-2">
+                    <button type="submit" className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-lg shadow-indigo-200 dark:shadow-none transition-all">
+                      {editingProjectId ? 'Zapisz' : 'Dodaj'}
+                    </button>
+                    {editingProjectId && (
+                      <button type="button" className="px-3 py-2 bg-slate-200 dark:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg" onClick={() => setEditingProjectId(null)}>✕</button>
+                    )}
+                  </div>
+                </div>
+              </form>
+            </section>
+
+            <section className="flex flex-col md:flex-row items-center gap-4 bg-white dark:bg-slate-800 p-4 rounded-xl shadow-md border border-slate-200 dark:border-slate-700 mb-8">
+              <label className="text-sm font-bold whitespace-nowrap">Wybrany projekt:</label>
+              <select 
+                value={activeProjectId || ''} 
+                onChange={handleActiveProjectChange}
+                className="w-full md:w-auto flex-1 px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+              >
+                <option value="">-- Wybierz projekt z listy --</option>
+                {projects.map(p => <option key={p.id} value={p.id}>{p.nazwa}</option>)}
+              </select>
+            </section>
+
+            {activeProjectId ? (
+              <main className="space-y-12 animate-in fade-in duration-500">
+                <section className="bg-indigo-50 dark:bg-indigo-900/20 p-6 rounded-2xl border border-indigo-100 dark:border-indigo-800/50">
+                  <h3 className="text-lg font-bold mb-4">{editingStoryId ? '📝 Edycja historyjki' : '✨ Nowa historyjka'}</h3>
+                  <form onSubmit={handleStorySubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <input placeholder="Nazwa" value={storyNazwa} onChange={(e) => setStoryNazwa(e.target.value)} required className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500" />
+                    <select value={storyPriorytet} onChange={(e) => setStoryPriorytet(e.target.value as 'niski' | 'średni' | 'wysoki')} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500">
+                      <option value="niski">Niski priorytet</option><option value="średni">Średni priorytet</option><option value="wysoki">Wysoki priorytet</option>
+                    </select>
+                    <input placeholder="Opis" value={storyOpis} onChange={(e) => setStoryOpis(e.target.value)} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500 md:col-span-1" />
+                    <div className="flex gap-2">
+                      <button type="submit" className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-md transition-all">{editingStoryId ? 'Zapisz' : 'Dodaj'}</button>
+                      {editingStoryId && <button type="button" className="px-4 bg-slate-200 dark:bg-slate-700 rounded-lg" onClick={resetStoryForm}>Anuluj</button>}
+                    </div>
+                  </form>
+                </section>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <Column title="To Do" items={todoStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-slate-100 dark:bg-slate-800/50" />
+                  <Column title="In Progress" items={doingStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-blue-50 dark:bg-blue-900/10" />
+                  <Column title="Done" items={doneStories} onSelect={handleStorySelect} selectedId={selectedStoryId} onEdit={handleStoryEdit} onDelete={handleStoryDelete} color="bg-emerald-50 dark:bg-emerald-900/10" />
+                </div>
+
+                {selectedStoryId && selectedStory && (
+                  <section className="mt-16 pt-16 border-t-2 border-slate-200 dark:border-slate-800 animate-in slide-in-from-bottom-8 duration-500">
+                    <div className="flex items-center justify-between mb-8">
+                      <h2 className="text-3xl font-black">Zadania: <span className="text-indigo-600 dark:text-indigo-400">{selectedStory.nazwa}</span></h2>
+                    </div>
+                    
+                    <div className="bg-slate-100 dark:bg-slate-800/50 p-6 rounded-2xl mb-8">
+                      <h3 className="text-sm font-bold uppercase tracking-widest text-slate-500 mb-4">➕ Nowe zadanie operacyjne</h3>
+                      <form onSubmit={handleTaskSubmit} className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <input placeholder="Nazwa zadania" value={taskNazwa} onChange={(e) => setTaskNazwa(e.target.value)} required className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500" />
+                        <select value={taskPriorytet} onChange={(e) => setTaskPriorytet(e.target.value as 'niski' | 'średni' | 'wysoki')} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 outline-none focus:ring-2 focus:ring-indigo-500">
+                          <option value="niski">Niski priorytet</option><option value="średni">Średni priorytet</option><option value="wysoki">Wysoki priorytet</option>
+                        </select>
+                        <div className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
+                          <span className="text-xs font-bold text-slate-400 uppercase">Godz:</span>
+                          <input type="number" min="1" value={taskCzas} onChange={(e) => setTaskCzas(parseInt(e.target.value))} className="w-full bg-transparent outline-none font-bold" />
+                        </div>
+                        <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg shadow-lg">Utwórz zadanie</button>
+                      </form>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                      <Column title="Zadania: Do zrobienia" items={todoTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-slate-100 dark:bg-slate-800/50" />
+                      <Column title="Zadania: W trakcie" items={doingTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-amber-50 dark:bg-amber-900/10" />
+                      <Column title="Zadania: Zakończone" items={doneTasks} onSelect={setSelectedTaskId} selectedId={selectedTaskId} onDelete={handleTaskDelete} isTask color="bg-emerald-50 dark:bg-emerald-900/10" />
+                    </div>
+                  </section>
+                )}
+              </main>
+            ) : (
+              <section className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
+                <h2 className="text-2xl font-bold mb-6">Wszystkie Projekty</h2>
+                {projects.length === 0 ? (
+                  <div className="text-center py-12 bg-slate-50 dark:bg-slate-900/50 rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-700">
+                    <p className="text-slate-500">Brak aktywnych projektów. Stwórz swój pierwszy projekt powyżej!</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {projects.map((p) => (
+                      <div key={p.id} className="group relative bg-slate-50 dark:bg-slate-900 p-6 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-indigo-500 transition-all hover:shadow-xl">
+                        <h3 className="text-xl font-bold mb-2 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">{p.nazwa}</h3>
+                        <p className="text-slate-500 dark:text-slate-400 text-sm line-clamp-3 mb-6">{p.opis}</p>
+                        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button className="flex-1 py-1.5 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-md text-sm font-bold" onClick={() => handleProjectEdit(p)}>Edytuj</button>
+                          <button className="flex-1 py-1.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-md text-sm font-bold" onClick={() => handleProjectDelete(p.id)}>Usuń</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+          </>
         )}
       </div>
 
+      {/* Modals & Toasts */}
       {selectedTaskId && selectedTask && (
         <TaskDetails 
           task={selectedTask} 
@@ -404,6 +520,28 @@ function App() {
           onComplete={handleTaskComplete}
         />
       )}
+
+      {selectedNotificationId && selectedNotification && (
+        <NotificationDetails 
+          notification={selectedNotification} 
+          onClose={() => setSelectedNotificationId(null)} 
+        />
+      )}
+
+      <div className="fixed bottom-4 right-4 z-[100] space-y-4 pointer-events-none">
+        {toasts.map(t => (
+          <div 
+            key={t.id} 
+            className="w-80 p-4 bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border-l-4 border-indigo-500 animate-in slide-in-from-right-full duration-300 pointer-events-auto"
+          >
+            <div className="flex justify-between items-start">
+              <h4 className="font-bold text-indigo-600 dark:text-indigo-400">{t.tytul}</h4>
+              <button onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))} className="text-slate-400">&times;</button>
+            </div>
+            <p className="text-xs mt-1 text-slate-500 dark:text-slate-400">{t.tresc}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -538,6 +676,42 @@ function TaskDetails({ task, storyName, onClose, onAssign, onComplete }: TaskDet
               Ukończ zadanie ✓
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface NotificationDetailsProps {
+  notification: Powiadomienie;
+  onClose: () => void;
+}
+
+function NotificationDetails({ notification, onClose }: NotificationDetailsProps) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-300" onClick={onClose}>
+      <div className="relative w-full max-w-lg bg-white dark:bg-slate-800 rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300" onClick={e => e.stopPropagation()}>
+        <div className={`h-2 w-full ${
+          notification.priorytet === 'high' ? 'bg-red-500' : 
+          notification.priorytet === 'medium' ? 'bg-amber-500' : 'bg-emerald-500'
+        }`}></div>
+        <button className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors text-2xl" onClick={onClose}>&times;</button>
+        
+        <div className="p-8 text-center">
+          <div className="text-5xl mb-4">🔔</div>
+          <h2 className="text-2xl font-black mb-2">{notification.tytul}</h2>
+          <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mb-6">{new Date(notification.data).toLocaleString()}</p>
+          
+          <div className="p-6 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-100 dark:border-slate-700 text-left mb-8">
+            <p className="text-slate-600 dark:text-slate-300 leading-relaxed">{notification.tresc}</p>
+          </div>
+
+          <button 
+            className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-2xl transition-all" 
+            onClick={onClose}
+          >
+            Zamknij
+          </button>
         </div>
       </div>
     </div>

@@ -1,8 +1,9 @@
-import type { Projekt, Uzytkownik, Historyjka, Zadanie } from './types';
+import type { Projekt, Uzytkownik, Historyjka, Zadanie, Powiadomienie } from './types';
 
 const PROJECTS_KEY = 'manageme_projects';
 const STORIES_KEY = 'manageme_stories';
 const TASKS_KEY = 'manageme_tasks';
+const NOTIFICATIONS_KEY = 'manageme_notifications';
 const ACTIVE_PROJECT_KEY = 'manageme_active_project';
 
 export const mockUsers: Uzytkownik[] = [
@@ -24,6 +25,74 @@ export const setActiveProjectId = (id: string | null): void => {
     localStorage.removeItem(ACTIVE_PROJECT_KEY);
   }
 };
+
+// Simple Event Bus for UI updates
+type NotificationListener = (notification: Powiadomienie) => void;
+class NotificationEmitter {
+  private listeners: NotificationListener[] = [];
+  subscribe(callback: NotificationListener) {
+    this.listeners.push(callback);
+    return () => { this.listeners = this.listeners.filter(l => l !== callback); };
+  }
+  emit(notification: Powiadomienie) {
+    this.listeners.forEach(l => l(notification));
+  }
+}
+export const notificationEmitter = new NotificationEmitter();
+
+export class NotificationService {
+  private getNotificationsFromStorage(): Powiadomienie[] {
+    const data = localStorage.getItem(NOTIFICATIONS_KEY);
+    return data ? JSON.parse(data) : [];
+  }
+
+  private saveNotificationsToStorage(notifications: Powiadomienie[]): void {
+    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications));
+  }
+
+  getAllForUser(userId: string): Powiadomienie[] {
+    return this.getNotificationsFromStorage()
+      .filter((n) => n.odbiorcaId === userId)
+      .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+  }
+
+  getUnreadCount(userId: string): number {
+    return this.getNotificationsFromStorage().filter((n) => n.odbiorcaId === userId && !n.czyPrzeczytane).length;
+  }
+
+  create(notification: Omit<Powiadomienie, 'id' | 'data' | 'czyPrzeczytane'>): Powiadomienie {
+    const notifications = this.getNotificationsFromStorage();
+    const newNotification: Powiadomienie = {
+      ...notification,
+      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+      data: new Date().toISOString(),
+      czyPrzeczytane: false,
+    };
+    notifications.push(newNotification);
+    this.saveNotificationsToStorage(notifications);
+    notificationEmitter.emit(newNotification);
+    return newNotification;
+  }
+
+  markAsRead(id: string): void {
+    const notifications = this.getNotificationsFromStorage();
+    const index = notifications.findIndex((n) => n.id === id);
+    if (index !== -1) {
+      notifications[index].czyPrzeczytane = true;
+      this.saveNotificationsToStorage(notifications);
+    }
+  }
+
+  markAllAsRead(userId: string): void {
+    const notifications = this.getNotificationsFromStorage();
+    notifications.forEach(n => {
+      if (n.odbiorcaId === userId) n.czyPrzeczytane = true;
+    });
+    this.saveNotificationsToStorage(notifications);
+  }
+}
+
+export const notificationService = new NotificationService();
 
 export class ProjectService {
   private getProjectsFromStorage(): Projekt[] {
@@ -51,6 +120,17 @@ export class ProjectService {
     };
     projects.push(newProject);
     this.saveProjectsToStorage(projects);
+
+    // Notification Logic: New project for all admins
+    mockUsers.filter(u => u.rola === 'admin').forEach(admin => {
+      notificationService.create({
+        tytul: 'Nowy Projekt',
+        tresc: `Utworzono nowy projekt: ${newProject.nazwa}`,
+        priorytet: 'high',
+        odbiorcaId: admin.id
+      });
+    });
+
     return newProject;
   }
 
@@ -128,6 +208,9 @@ export class StoryService {
   }
 }
 
+export const projectService = new ProjectService();
+export const storyService = new StoryService();
+
 export class TaskService {
   private getTasksFromStorage(): Zadanie[] {
     const data = localStorage.getItem(TASKS_KEY);
@@ -155,6 +238,18 @@ export class TaskService {
     };
     tasks.push(newTask);
     this.saveTasksToStorage(tasks);
+
+    // Notification Logic: New task for story owner
+    const story = storyService.getById(newTask.historyjkaId);
+    if (story) {
+      notificationService.create({
+        tytul: 'Nowe zadanie w historyjce',
+        tresc: `Dodano zadanie "${newTask.nazwa}" do Twojej historyjki "${story.nazwa}"`,
+        priorytet: 'medium',
+        odbiorcaId: story.wlascicielId
+      });
+    }
+
     return newTask;
   }
 
@@ -165,6 +260,16 @@ export class TaskService {
 
     const oldTask = tasks[index];
     const finalTask = { ...updatedTask };
+
+    // Notification Logic: Task assignment
+    if (finalTask.wlascicielId && finalTask.wlascicielId !== oldTask.wlascicielId) {
+      notificationService.create({
+        tytul: 'Przypisano zadanie',
+        tresc: `Zostałeś przypisany do zadania: ${finalTask.nazwa}`,
+        priorytet: 'high',
+        odbiorcaId: finalTask.wlascicielId
+      });
+    }
 
     // Business Logic: Assigning user (devops/developer) to a 'todo' task
     if (finalTask.wlascicielId && finalTask.stan === 'todo' && oldTask.stan === 'todo') {
@@ -181,20 +286,32 @@ export class TaskService {
       }
     }
 
-    // Business Logic: Changing state to 'done'
-    if (finalTask.stan === 'done' && oldTask.stan !== 'done') {
-      finalTask.dataZakonczenia = new Date().toISOString();
-      
-      // Propagate to Story if all tasks are done
-      setTimeout(() => {
-        const allStoryTasks = this.getAllForStory(finalTask.historyjkaId);
-        const otherTasks = allStoryTasks.filter(t => t.id !== finalTask.id);
-        const allDone = otherTasks.every(t => t.stan === 'done');
+    // Business Logic & Notifications: State changes
+    if (finalTask.stan !== oldTask.stan) {
+      const story = storyService.getById(finalTask.historyjkaId);
+      if (story) {
+        notificationService.create({
+          tytul: 'Zmiana statusu zadania',
+          tresc: `Zadanie "${finalTask.nazwa}" zmieniło stan na "${finalTask.stan}"`,
+          priorytet: finalTask.stan === 'done' ? 'medium' : 'low',
+          odbiorcaId: story.wlascicielId
+        });
+      }
+
+      if (finalTask.stan === 'done') {
+        finalTask.dataZakonczenia = new Date().toISOString();
         
-        if (allDone) {
-          storyService.updateState(finalTask.historyjkaId, 'done');
-        }
-      }, 0);
+        // Propagate to Story if all tasks are done
+        setTimeout(() => {
+          const allStoryTasks = this.getAllForStory(finalTask.historyjkaId);
+          const otherTasks = allStoryTasks.filter(t => t.id !== finalTask.id);
+          const allDone = otherTasks.every(t => t.stan === 'done');
+          
+          if (allDone) {
+            storyService.updateState(finalTask.historyjkaId, 'done');
+          }
+        }, 0);
+      }
     }
 
     tasks[index] = finalTask;
@@ -204,11 +321,23 @@ export class TaskService {
 
   delete(id: string): void {
     const tasks = this.getTasksFromStorage();
+    const taskToDelete = tasks.find(t => t.id === id);
     const filteredTasks = tasks.filter((t) => t.id !== id);
     this.saveTasksToStorage(filteredTasks);
+
+    // Notification Logic: Task deletion
+    if (taskToDelete) {
+      const story = storyService.getById(taskToDelete.historyjkaId);
+      if (story) {
+        notificationService.create({
+          tytul: 'Usunięto zadanie',
+          tresc: `Zadanie "${taskToDelete.nazwa}" zostało usunięte z historyjki "${story.nazwa}"`,
+          priorytet: 'medium',
+          odbiorcaId: story.wlascicielId
+        });
+      }
+    }
   }
 }
 
-export const projectService = new ProjectService();
-export const storyService = new StoryService();
 export const taskService = new TaskService();

@@ -37,3 +37,13 @@ export interface Zadanie {
   dataZakonczenia?: string;
   wlascicielId?: string;
 }
+
+export interface Powiadomienie {
+  id: string;
+  tytul: string;
+  tresc: string;
+  data: string;
+  priorytet: 'low' | 'medium' | 'high';
+  czyPrzeczytane: boolean;
+  odbiorcaId: string;
+}
