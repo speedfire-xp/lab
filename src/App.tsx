@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { GoogleLogin, googleLogout, type CredentialResponse } from '@react-oauth/google';
 import { jwtDecode } from 'jwt-decode';
@@ -24,7 +24,8 @@ interface GoogleProfile {
 
 function App() {
   // Auth state
-  const [loggedUser, setLoggedUser] = useState<Uzytkownik | null>(authService.getLoggedUser());
+  const [loggedUser, setLoggedUser] = useState<Uzytkownik | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // Theme state
   const [darkMode, setDarkMode] = useState(() => {
@@ -33,7 +34,7 @@ function App() {
   });
 
   // Projects state
-  const [projects, setProjects] = useState<Projekt[]>(projectService.getAll());
+  const [projects, setProjects] = useState<Projekt[]>([]);
   const [nazwa, setNazwa] = useState('');
   const [opis, setOpis] = useState('');
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -42,9 +43,7 @@ function App() {
   const [activeProjectId, setActiveProjectIdState] = useState<string | null>(getActiveProjectId());
 
   // Stories state
-  const [stories, setStories] = useState<Historyjka[]>(
-    activeProjectId ? storyService.getAllForProject(activeProjectId) : []
-  );
+  const [stories, setStories] = useState<Historyjka[]>([]);
   const [selectedStoryId, setSelectedStoryId] = useState<string | null>(null);
   
   // Story Form state
@@ -65,21 +64,60 @@ function App() {
   const [taskCzas, setTaskCzas] = useState(1);
 
   // Notification state
-  const [notifications, setNotifications] = useState<Powiadomienie[]>(
-    loggedUser ? notificationService.getAllForUser(loggedUser.id) : []
-  );
-  const [unreadCount, setUnreadCount] = useState(
-    loggedUser ? notificationService.getUnreadCount(loggedUser.id) : 0
-  );
+  const [notifications, setNotifications] = useState<Powiadomienie[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
   const [view, setView] = useState<'board' | 'notifications' | 'admin'>('board');
   const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Powiadomienie[]>([]);
 
   // Admin state
-  const [allUsers, setAllUsers] = useState<Uzytkownik[]>(
-    loggedUser?.rola === 'admin' ? userService.getAll() : []
-  );
+  const [allUsers, setAllUsers] = useState<Uzytkownik[]>([]);
 
+  // --- Helper Refresh Functions ---
+  const refreshProjects = useCallback(async () => {
+    const allProjects = await projectService.getAll();
+    setProjects(allProjects);
+  }, []);
+
+  const refreshStories = useCallback(async (projectId: string) => {
+    const updatedStories = await storyService.getAllForProject(projectId);
+    setStories(updatedStories);
+  }, []);
+
+  const refreshTasks = useCallback(async (storyId: string) => {
+    const updatedTasks = await taskService.getAllForStory(storyId);
+    setTasks(updatedTasks);
+    const currentActiveId = getActiveProjectId();
+    if (currentActiveId) await refreshStories(currentActiveId);
+  }, [refreshStories]);
+
+  const refreshNotifications = useCallback(async (userId: string) => {
+    const [all, unread] = await Promise.all([
+      notificationService.getAllForUser(userId),
+      notificationService.getUnreadCount(userId)
+    ]);
+    setNotifications(all);
+    setUnreadCount(unread);
+  }, []);
+
+  const refreshUsers = useCallback(async () => {
+    const users = await userService.getAll();
+    setAllUsers(users);
+  }, []);
+
+  const refreshAll = useCallback(async (user: Uzytkownik) => {
+    const currentActiveId = getActiveProjectId();
+    await Promise.all([
+      refreshProjects(),
+      refreshNotifications(user.id),
+      currentActiveId ? refreshStories(currentActiveId) : Promise.resolve(),
+      user.rola === 'admin' ? refreshUsers() : Promise.resolve()
+    ]);
+  }, [refreshProjects, refreshNotifications, refreshUsers, refreshStories]);
+
+  // --- Effects ---
+
+  // 1. Theme sync
   useEffect(() => {
     if (darkMode) {
       document.documentElement.classList.add('dark');
@@ -90,7 +128,20 @@ function App() {
     }
   }, [darkMode]);
 
-  // Real-time notifications listener
+  // 2. Initial Auth & Data Load
+  useEffect(() => {
+    const initAuth = async () => {
+      const user = await authService.getLoggedUser();
+      setLoggedUser(user);
+      setAuthLoading(false);
+      if (user) {
+        await refreshAll(user);
+      }
+    };
+    initAuth();
+  }, [refreshAll]);
+
+  // 3. Real-time notifications listener
   useEffect(() => {
     const unsubscribe = notificationEmitter.subscribe((n) => {
       if (loggedUser && n.odbiorcaId === loggedUser.id) {
@@ -108,41 +159,15 @@ function App() {
     return unsubscribe;
   }, [loggedUser]);
 
-  const refreshProjects = () => {
-    setProjects(projectService.getAll());
-  };
+  // --- Handlers ---
 
-  const refreshStories = (projectId: string) => {
-    const updatedStories = storyService.getAllForProject(projectId);
-    setStories(updatedStories);
-  };
-
-  const refreshTasks = (storyId: string) => {
-    setTasks(taskService.getAllForStory(storyId));
-    if (activeProjectId) refreshStories(activeProjectId);
-  };
-
-  const refreshNotifications = () => {
-    if (loggedUser) {
-      setNotifications(notificationService.getAllForUser(loggedUser.id));
-      setUnreadCount(notificationService.getUnreadCount(loggedUser.id));
-    }
-  };
-
-  const refreshUsers = () => {
-    setAllUsers(userService.getAll());
-  };
-
-  // Auth handlers
-  const handleLoginSuccess = (credentialResponse: CredentialResponse) => {
+  const handleLoginSuccess = async (credentialResponse: CredentialResponse) => {
     if (credentialResponse.credential) {
       const profile = jwtDecode<GoogleProfile>(credentialResponse.credential);
-      const user = authService.login(profile);
+      const user = await authService.login(profile);
       setLoggedUser(user);
       setView('board');
-      setNotifications(notificationService.getAllForUser(user.id));
-      setUnreadCount(notificationService.getUnreadCount(user.id));
-      if (user.rola === 'admin') setAllUsers(userService.getAll());
+      await refreshAll(user);
     }
   };
 
@@ -156,24 +181,25 @@ function App() {
     setNotifications([]);
     setUnreadCount(0);
     setAllUsers([]);
+    setStories([]);
+    setTasks([]);
   };
 
-  // Project handlers
-  const handleProjectSubmit = (e: FormEvent) => {
+  const handleProjectSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!nazwa.trim()) return;
 
     if (editingProjectId) {
-      projectService.update({ id: editingProjectId, nazwa, opis });
+      await projectService.update({ id: editingProjectId, nazwa, opis });
       setEditingProjectId(null);
     } else {
-      projectService.create({ nazwa, opis });
+      await projectService.create({ nazwa, opis });
     }
 
     setNazwa('');
     setOpis('');
-    refreshProjects();
-    if (loggedUser?.rola === 'admin') refreshUsers(); // Users might have received notification
+    await refreshProjects();
+    if (loggedUser?.rola === 'admin') await refreshUsers();
   };
 
   const handleProjectEdit = (p: Projekt) => {
@@ -182,41 +208,41 @@ function App() {
     setEditingProjectId(p.id);
   };
 
-  const handleProjectDelete = (id: string) => {
+  const handleProjectDelete = async (id: string) => {
     if (confirm('Czy na pewno chcesz usunąć ten projekt?')) {
-      projectService.delete(id);
+      await projectService.delete(id);
       if (activeProjectId === id) {
         setActiveProjectIdState(null);
         setActiveProjectId(null);
         setStories([]);
+        setTasks([]);
         setSelectedStoryId(null);
       }
-      refreshProjects();
+      await refreshProjects();
     }
   };
 
-  const handleActiveProjectChange = (e: ChangeEvent<HTMLSelectElement>) => {
+  const handleActiveProjectChange = async (e: ChangeEvent<HTMLSelectElement>) => {
     const id = e.target.value || null;
     setActiveProjectIdState(id);
     setActiveProjectId(id);
     setSelectedStoryId(null);
-    setTasks([]);
     if (id) {
-      refreshStories(id);
+      await refreshStories(id);
     } else {
       setStories([]);
+      setTasks([]);
     }
   };
 
-  // Story handlers
-  const handleStorySubmit = (e: FormEvent) => {
+  const handleStorySubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!storyNazwa.trim() || !activeProjectId || !loggedUser) return;
 
     if (editingStoryId) {
       const existing = stories.find(s => s.id === editingStoryId);
       if (existing) {
-        storyService.update({
+        await storyService.update({
           ...existing,
           nazwa: storyNazwa,
           opis: storyOpis,
@@ -226,7 +252,7 @@ function App() {
       }
       setEditingStoryId(null);
     } else {
-      storyService.create({
+      await storyService.create({
         nazwa: storyNazwa,
         opis: storyOpis,
         priorytet: storyPriorytet,
@@ -237,7 +263,7 @@ function App() {
     }
 
     resetStoryForm();
-    refreshStories(activeProjectId);
+    await refreshStories(activeProjectId);
   };
 
   const handleStoryEdit = (s: Historyjka, e: React.MouseEvent) => {
@@ -249,21 +275,22 @@ function App() {
     setEditingStoryId(s.id);
   };
 
-  const handleStoryDelete = (id: string, e: React.MouseEvent) => {
+  const handleStoryDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Czy na pewno chcesz usunąć tę historyjkę?')) {
-      storyService.delete(id);
+      await storyService.delete(id);
       if (selectedStoryId === id) {
         setSelectedStoryId(null);
         setTasks([]);
       }
-      if (activeProjectId) refreshStories(activeProjectId);
+      if (activeProjectId) await refreshStories(activeProjectId);
     }
   };
 
-  const handleStorySelect = (id: string) => {
+  const handleStorySelect = async (id: string) => {
     setSelectedStoryId(id);
-    setTasks(taskService.getAllForStory(id));
+    const updatedTasks = await taskService.getAllForStory(id);
+    setTasks(updatedTasks);
   };
 
   const resetStoryForm = () => {
@@ -274,12 +301,11 @@ function App() {
     setEditingStoryId(null);
   };
 
-  // Task handlers
-  const handleTaskSubmit = (e: FormEvent) => {
+  const handleTaskSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!taskNazwa.trim() || !selectedStoryId) return;
 
-    taskService.create({
+    await taskService.create({
       nazwa: taskNazwa,
       opis: taskOpis,
       priorytet: taskPriorytet,
@@ -292,54 +318,59 @@ function App() {
     setTaskOpis('');
     setTaskPriorytet('niski');
     setTaskCzas(1);
-    refreshTasks(selectedStoryId);
+    await refreshTasks(selectedStoryId);
   };
 
-  const handleTaskAssignUser = (taskId: string, userId: string) => {
-    const task = taskService.getById(taskId);
+  const handleTaskAssignUser = async (taskId: string, userId: string) => {
+    const task = await taskService.getById(taskId);
     if (task) {
-      taskService.update({ ...task, wlascicielId: userId });
-      if (selectedStoryId) refreshTasks(selectedStoryId);
+      await taskService.update({ ...task, wlascicielId: userId });
+      if (selectedStoryId) await refreshTasks(selectedStoryId);
     }
   };
 
-  const handleTaskComplete = (taskId: string) => {
-    const task = taskService.getById(taskId);
+  const handleTaskComplete = async (taskId: string) => {
+    const task = await taskService.getById(taskId);
     if (task) {
-      taskService.update({ ...task, stan: 'done' });
-      setTimeout(() => {
-        if (selectedStoryId) refreshTasks(selectedStoryId);
-      }, 50);
+      await taskService.update({ ...task, stan: 'done' });
+      setTimeout(async () => {
+        if (selectedStoryId) await refreshTasks(selectedStoryId);
+      }, 200);
     }
   };
 
-  const handleTaskDelete = (id: string, e: React.MouseEvent) => {
+  const handleTaskDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Czy na pewno chcesz usunąć to zadanie?')) {
-      taskService.delete(id);
-      if (selectedStoryId) refreshTasks(selectedStoryId);
+      await taskService.delete(id);
+      if (selectedStoryId) await refreshTasks(selectedStoryId);
     }
   };
 
-  // Notification handlers
-  const handleNotificationClick = (id: string) => {
+  const handleNotificationClick = async (id: string) => {
     setSelectedNotificationId(id);
-    notificationService.markAsRead(id);
-    refreshNotifications();
+    await notificationService.markAsRead(id);
+    if (loggedUser) await refreshNotifications(loggedUser.id);
   };
 
-  // Admin handlers
-  const handleUpdateUserRole = (userId: string, role: Rola) => {
-    userService.updateRole(userId, role);
-    refreshUsers();
+  const handleMarkAllNotificationsAsRead = async () => {
+    if (loggedUser) {
+      await notificationService.markAllAsRead(loggedUser.id);
+      await refreshNotifications(loggedUser.id);
+    }
   };
 
-  const handleToggleBlock = (userId: string) => {
-    userService.toggleBlock(userId);
-    refreshUsers();
+  const handleUpdateUserRole = async (userId: string, role: Rola) => {
+    await userService.updateRole(userId, role);
+    await refreshUsers();
   };
 
-  // Memoized data
+  const handleToggleBlock = async (userId: string) => {
+    await userService.toggleBlock(userId);
+    await refreshUsers();
+  };
+
+  // --- Memoized data ---
   const todoStories = useMemo(() => stories.filter(s => s.stan === 'todo'), [stories]);
   const doingStories = useMemo(() => stories.filter(s => s.stan === 'doing'), [stories]);
   const doneStories = useMemo(() => stories.filter(s => s.stan === 'done'), [stories]);
@@ -352,7 +383,16 @@ function App() {
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
   const selectedNotification = useMemo(() => notifications.find(n => n.id === selectedNotificationId), [notifications, selectedNotificationId]);
 
-  // Conditional Rendering for Login/Auth states
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
+  // --- Component Views ---
+
   if (!loggedUser) {
     return (
       <div className={`min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 ${darkMode ? 'dark' : ''}`}>
@@ -501,7 +541,7 @@ function App() {
           <section className="animate-in fade-in duration-500">
             <div className="flex items-center justify-between mb-8">
               <h2 className="text-3xl font-black">Twoje Powiadomienia</h2>
-              <button onClick={() => { notificationService.markAllAsRead(loggedUser.id); refreshNotifications(); }} className="text-xs font-black text-indigo-600 hover:underline">OZNACZ WSZYSTKIE JAKO PRZECZYTANE</button>
+              <button onClick={handleMarkAllNotificationsAsRead} className="text-xs font-black text-indigo-600 hover:underline">OZNACZ WSZYSTKIE JAKO PRZECZYTANE</button>
             </div>
 
             {notifications.length === 0 ? (
@@ -717,6 +757,16 @@ interface ColumnProps {
 }
 
 function Column({ title, items, onSelect, selectedId, onEdit, onDelete, isTask, color }: ColumnProps) {
+  const [allUsers, setAllUsers] = useState<Uzytkownik[]>([]);
+  
+  useEffect(() => {
+    const loadUsers = async () => {
+      const users = await userService.getAll();
+      setAllUsers(users);
+    };
+    loadUsers();
+  }, []);
+
   return (
     <div className={`p-4 rounded-2xl ${color} min-h-[400px] border border-slate-200 dark:border-slate-700/50 shadow-inner`}>
       <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 mb-6 text-center">{title} <span className="ml-2 px-2 py-0.5 bg-white dark:bg-slate-700 rounded-full text-[10px]">{items.length}</span></h3>
@@ -740,7 +790,7 @@ function Column({ title, items, onSelect, selectedId, onEdit, onDelete, isTask, 
               {isTask && 'wlascicielId' in item && item.wlascicielId && (
                 <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 bg-slate-50 dark:bg-slate-700/50 px-2 py-1 rounded-full border border-slate-200 dark:border-slate-600">
                   <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
-                  {userService.getAll().find(u => u.id === (item as Zadanie).wlascicielId)?.imie}
+                  {allUsers.find(u => u.id === (item as Zadanie).wlascicielId)?.imie}
                 </div>
               )}
             </div>
@@ -764,7 +814,16 @@ interface TaskDetailsProps {
 }
 
 function TaskDetails({ task, storyName, onClose, onAssign, onComplete }: TaskDetailsProps) {
-  const allUsers = userService.getAll();
+  const [allUsers, setAllUsers] = useState<Uzytkownik[]>([]);
+  
+  useEffect(() => {
+    const loadUsers = async () => {
+      const users = await userService.getAll();
+      setAllUsers(users);
+    };
+    loadUsers();
+  }, []);
+
   const assignableUsers = allUsers.filter(u => (u.rola === 'developer' || u.rola === 'devops') && !u.czyZablokowany);
   const assignedUser = allUsers.find(u => u.id === task.wlascicielId);
 

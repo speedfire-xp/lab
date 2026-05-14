@@ -1,3 +1,16 @@
+import { 
+  collection, 
+  getDocs, 
+  getDoc, 
+  doc, 
+  setDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  where 
+} from 'firebase/firestore';
+import { db } from './firebase';
+import { STORAGE_MODE } from './config';
 import type { Projekt, Uzytkownik, Historyjka, Zadanie, Powiadomienie, Rola } from './types';
 
 const PROJECTS_KEY = 'manageme_projects';
@@ -8,7 +21,7 @@ const USERS_KEY = 'manageme_users';
 const LOGGED_USER_KEY = 'manageme_logged_user';
 const ACTIVE_PROJECT_KEY = 'manageme_active_project';
 
-const SUPER_ADMIN_EMAIL = 'speedfirexp@gmail.com'; // Zmień na swój e-mail
+const SUPER_ADMIN_EMAIL = 'admin@manageme.com';
 
 export const getActiveProjectId = (): string | null => {
   return localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -37,27 +50,38 @@ class NotificationEmitter {
 export const notificationEmitter = new NotificationEmitter();
 
 export class UserService {
-  getAll(): Uzytkownik[] {
-    const data = localStorage.getItem(USERS_KEY);
-    return data ? JSON.parse(data) : [];
+  async getAll(): Promise<Uzytkownik[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const querySnapshot = await getDocs(collection(db, USERS_KEY));
+      return querySnapshot.docs.map(doc => doc.data() as Uzytkownik);
+    } else {
+      const data = localStorage.getItem(USERS_KEY);
+      return data ? JSON.parse(data) : [];
+    }
   }
 
-  private saveAll(users: Uzytkownik[]): void {
+  private async saveAll(users: Uzytkownik[]): Promise<void> {
     localStorage.setItem(USERS_KEY, JSON.stringify(users));
   }
 
-  getByEmail(email: string): Uzytkownik | undefined {
-    return this.getAll().find(u => u.email === email);
+  async getByEmail(email: string): Promise<Uzytkownik | undefined> {
+    const users = await this.getAll();
+    return users.find(u => u.email === email);
   }
 
-  create(user: Uzytkownik): void {
-    const users = this.getAll();
-    users.push(user);
-    this.saveAll(users);
+  async create(user: Uzytkownik): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, USERS_KEY, user.id), user);
+    } else {
+      const users = await this.getAll();
+      users.push(user);
+      await this.saveAll(users);
+    }
 
     // Notify admins about new user
-    this.getAll().filter(u => u.rola === 'admin').forEach(admin => {
-      notificationService.create({
+    const users = await this.getAll();
+    users.filter(u => u.rola === 'admin').forEach(async (admin) => {
+      await notificationService.create({
         tytul: 'Nowe konto w systemie',
         tresc: `Zarejestrowano nowego użytkownika: ${user.email}`,
         priorytet: 'high',
@@ -66,21 +90,33 @@ export class UserService {
     });
   }
 
-  updateRole(userId: string, role: Rola): void {
-    const users = this.getAll();
-    const index = users.findIndex(u => u.id === userId);
-    if (index !== -1) {
-      users[index].rola = role;
-      this.saveAll(users);
+  async updateRole(userId: string, role: Rola): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      await updateDoc(doc(db, USERS_KEY, userId), { rola: role });
+    } else {
+      const users = await this.getAll();
+      const index = users.findIndex(u => u.id === userId);
+      if (index !== -1) {
+        users[index].rola = role;
+        await this.saveAll(users);
+      }
     }
   }
 
-  toggleBlock(userId: string): void {
-    const users = this.getAll();
-    const index = users.findIndex(u => u.id === userId);
-    if (index !== -1) {
-      users[index].czyZablokowany = !users[index].czyZablokowany;
-      this.saveAll(users);
+  async toggleBlock(userId: string): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      const users = await this.getAll();
+      const user = users.find(u => u.id === userId);
+      if (user) {
+        await updateDoc(doc(db, USERS_KEY, userId), { czyZablokowany: !user.czyZablokowany });
+      }
+    } else {
+      const users = await this.getAll();
+      const index = users.findIndex(u => u.id === userId);
+      if (index !== -1) {
+        users[index].czyZablokowany = !users[index].czyZablokowany;
+        await this.saveAll(users);
+      }
     }
   }
 }
@@ -88,18 +124,17 @@ export class UserService {
 export const userService = new UserService();
 
 export class AuthService {
-  getLoggedUser(): Uzytkownik | null {
+  async getLoggedUser(): Promise<Uzytkownik | null> {
     const data = sessionStorage.getItem(LOGGED_USER_KEY);
     if (!data) return null;
     const user = JSON.parse(data);
-    // Sync with DB (e.g. if blocked or role changed)
-    const dbUser = userService.getByEmail(user.email);
+    const dbUser = await userService.getByEmail(user.email);
     return dbUser || null;
   }
 
-  login(googleProfile: { email: string; given_name: string; family_name: string }): Uzytkownik {
+  async login(googleProfile: { email: string; given_name: string; family_name: string }): Promise<Uzytkownik> {
     const email = googleProfile.email;
-    let user = userService.getByEmail(email);
+    let user = await userService.getByEmail(email);
 
     if (!user) {
       const newUser: Uzytkownik = {
@@ -110,7 +145,7 @@ export class AuthService {
         rola: email === SUPER_ADMIN_EMAIL ? 'admin' : 'gość',
         czyZablokowany: false
       };
-      userService.create(newUser);
+      await userService.create(newUser);
       user = newUser;
     }
 
@@ -126,89 +161,128 @@ export class AuthService {
 export const authService = new AuthService();
 
 export class NotificationService {
-  private getNotificationsFromStorage(): Powiadomienie[] {
-    const data = localStorage.getItem(NOTIFICATIONS_KEY);
-    return data ? JSON.parse(data) : [];
+  private async getNotificationsFromStorage(): Promise<Powiadomienie[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const querySnapshot = await getDocs(collection(db, NOTIFICATIONS_KEY));
+      return querySnapshot.docs.map(doc => doc.data() as Powiadomienie);
+    } else {
+      const data = localStorage.getItem(NOTIFICATIONS_KEY);
+      return data ? JSON.parse(data) : [];
+    }
   }
 
-  private saveNotificationsToStorage(notifications: Powiadomienie[]): void {
+  private async saveNotificationsToStorage(notifications: Powiadomienie[]): Promise<void> {
     localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications));
   }
 
-  getAllForUser(userId: string): Powiadomienie[] {
-    return this.getNotificationsFromStorage()
-      .filter((n) => n.odbiorcaId === userId)
-      .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+  async getAllForUser(userId: string): Promise<Powiadomienie[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const q = query(collection(db, NOTIFICATIONS_KEY), where("odbiorcaId", "==", userId));
+      const querySnapshot = await getDocs(q);
+      return querySnapshot.docs
+        .map(doc => doc.data() as Powiadomienie)
+        .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+    } else {
+      const all = await this.getNotificationsFromStorage();
+      return all
+        .filter((n) => n.odbiorcaId === userId)
+        .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
+    }
   }
 
-  getUnreadCount(userId: string): number {
-    return this.getNotificationsFromStorage().filter((n) => n.odbiorcaId === userId && !n.czyPrzeczytane).length;
+  async getUnreadCount(userId: string): Promise<number> {
+    const all = await this.getAllForUser(userId);
+    return all.filter(n => !n.czyPrzeczytane).length;
   }
 
-  create(notification: Omit<Powiadomienie, 'id' | 'data' | 'czyPrzeczytane'>): Powiadomienie {
-    const notifications = this.getNotificationsFromStorage();
+  async create(notification: Omit<Powiadomienie, 'id' | 'data' | 'czyPrzeczytane'>): Promise<Powiadomienie> {
+    const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
     const newNotification: Powiadomienie = {
       ...notification,
-      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+      id,
       data: new Date().toISOString(),
       czyPrzeczytane: false,
     };
-    notifications.push(newNotification);
-    this.saveNotificationsToStorage(notifications);
+
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, NOTIFICATIONS_KEY, id), newNotification);
+    } else {
+      const notifications = await this.getNotificationsFromStorage();
+      notifications.push(newNotification);
+      await this.saveNotificationsToStorage(notifications);
+    }
+
     notificationEmitter.emit(newNotification);
     return newNotification;
   }
 
-  markAsRead(id: string): void {
-    const notifications = this.getNotificationsFromStorage();
-    const index = notifications.findIndex((n) => n.id === id);
-    if (index !== -1) {
-      notifications[index].czyPrzeczytane = true;
-      this.saveNotificationsToStorage(notifications);
+  async markAsRead(id: string): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      await updateDoc(doc(db, NOTIFICATIONS_KEY, id), { czyPrzeczytane: true });
+    } else {
+      const notifications = await this.getNotificationsFromStorage();
+      const index = notifications.findIndex((n) => n.id === id);
+      if (index !== -1) {
+        notifications[index].czyPrzeczytane = true;
+        await this.saveNotificationsToStorage(notifications);
+      }
     }
   }
 
-  markAllAsRead(userId: string): void {
-    const notifications = this.getNotificationsFromStorage();
-    notifications.forEach(n => {
-      if (n.odbiorcaId === userId) n.czyPrzeczytane = true;
-    });
-    this.saveNotificationsToStorage(notifications);
+  async markAllAsRead(userId: string): Promise<void> {
+    const notifications = await this.getAllForUser(userId);
+    for (const n of notifications) {
+      if (!n.czyPrzeczytane) {
+        await this.markAsRead(n.id);
+      }
+    }
   }
 }
 
 export const notificationService = new NotificationService();
 
 export class ProjectService {
-  private getProjectsFromStorage(): Projekt[] {
-    const data = localStorage.getItem(PROJECTS_KEY);
-    return data ? JSON.parse(data) : [];
+  async getAll(): Promise<Projekt[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const querySnapshot = await getDocs(collection(db, PROJECTS_KEY));
+      return querySnapshot.docs.map(doc => doc.data() as Projekt);
+    } else {
+      const data = localStorage.getItem(PROJECTS_KEY);
+      return data ? JSON.parse(data) : [];
+    }
   }
 
-  private saveProjectsToStorage(projects: Projekt[]): void {
+  private async saveProjectsToStorage(projects: Projekt[]): Promise<void> {
     localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
   }
 
-  getAll(): Projekt[] {
-    return this.getProjectsFromStorage();
+  async getById(id: string): Promise<Projekt | undefined> {
+    if (STORAGE_MODE === 'firebase') {
+      const docRef = doc(db, PROJECTS_KEY, id);
+      const docSnap = await getDoc(docRef);
+      return docSnap.exists() ? docSnap.data() as Projekt : undefined;
+    } else {
+      const projects = await this.getAll();
+      return projects.find((p) => p.id === id);
+    }
   }
 
-  getById(id: string): Projekt | undefined {
-    return this.getProjectsFromStorage().find((p) => p.id === id);
-  }
+  async create(projekt: Omit<Projekt, 'id'>): Promise<Projekt> {
+    const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
+    const newProject: Projekt = { ...projekt, id };
 
-  create(projekt: Omit<Projekt, 'id'>): Projekt {
-    const projects = this.getProjectsFromStorage();
-    const newProject: Projekt = {
-      ...projekt,
-      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
-    };
-    projects.push(newProject);
-    this.saveProjectsToStorage(projects);
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, PROJECTS_KEY, id), newProject);
+    } else {
+      const projects = await this.getAll();
+      projects.push(newProject);
+      await this.saveProjectsToStorage(projects);
+    }
 
     // Notification Logic: New project for all admins
-    userService.getAll().filter(u => u.rola === 'admin').forEach(admin => {
-      notificationService.create({
+    const users = await userService.getAll();
+    users.filter(u => u.rola === 'admin').forEach(async (admin) => {
+      await notificationService.create({
         tytul: 'Nowy Projekt',
         tresc: `Utworzono nowy projekt: ${newProject.nazwa}`,
         priorytet: 'high',
@@ -219,115 +293,182 @@ export class ProjectService {
     return newProject;
   }
 
-  update(updatedProject: Projekt): Projekt {
-    const projects = this.getProjectsFromStorage();
-    const index = projects.findIndex((p) => p.id === updatedProject.id);
-    if (index !== -1) {
-      projects[index] = updatedProject;
-      this.saveProjectsToStorage(projects);
+  async update(updatedProject: Projekt): Promise<Projekt> {
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, PROJECTS_KEY, updatedProject.id), updatedProject);
+    } else {
+      const projects = await this.getAll();
+      const index = projects.findIndex((p) => p.id === updatedProject.id);
+      if (index !== -1) {
+        projects[index] = updatedProject;
+        await this.saveProjectsToStorage(projects);
+      }
     }
     return updatedProject;
   }
 
-  delete(id: string): void {
-    const projects = this.getProjectsFromStorage();
-    const filteredProjects = projects.filter((p) => p.id !== id);
-    this.saveProjectsToStorage(filteredProjects);
+  async delete(id: string): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      await deleteDoc(doc(db, PROJECTS_KEY, id));
+    } else {
+      const projects = await this.getAll();
+      const filteredProjects = projects.filter((p) => p.id !== id);
+      await this.saveProjectsToStorage(filteredProjects);
+    }
     if (getActiveProjectId() === id) {
       setActiveProjectId(null);
     }
   }
 }
 
+export const projectService = new ProjectService();
+
 export class StoryService {
-  private getStoriesFromStorage(): Historyjka[] {
-    const data = localStorage.getItem(STORIES_KEY);
-    return data ? JSON.parse(data) : [];
+  async getAll(): Promise<Historyjka[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const querySnapshot = await getDocs(collection(db, STORIES_KEY));
+      return querySnapshot.docs.map(doc => doc.data() as Historyjka);
+    } else {
+      const data = localStorage.getItem(STORIES_KEY);
+      return data ? JSON.parse(data) : [];
+    }
   }
 
-  private saveStoriesToStorage(stories: Historyjka[]): void {
+  private async saveStoriesToStorage(stories: Historyjka[]): Promise<void> {
     localStorage.setItem(STORIES_KEY, JSON.stringify(stories));
   }
 
-  getAllForProject(projectId: string): Historyjka[] {
-    return this.getStoriesFromStorage().filter((s) => s.projektId === projectId);
+  async getAllForProject(projectId: string): Promise<Historyjka[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const q = query(collection(db, STORIES_KEY), where("projektId", "==", projectId));
+      const querySnapshot = await getDocs(q);
+      return querySnapshot.docs.map(doc => doc.data() as Historyjka);
+    } else {
+      const all = await this.getAll();
+      return all.filter((s) => s.projektId === projectId);
+    }
   }
 
-  getById(id: string): Historyjka | undefined {
-    return this.getStoriesFromStorage().find((s) => s.id === id);
+  async getById(id: string): Promise<Historyjka | undefined> {
+    if (STORAGE_MODE === 'firebase') {
+      const docRef = doc(db, STORIES_KEY, id);
+      const docSnap = await getDoc(docRef);
+      return docSnap.exists() ? docSnap.data() as Historyjka : undefined;
+    } else {
+      const all = await this.getAll();
+      return all.find((s) => s.id === id);
+    }
   }
 
-  create(story: Omit<Historyjka, 'id' | 'dataUtworzenia'>): Historyjka {
-    const stories = this.getStoriesFromStorage();
+  async create(story: Omit<Historyjka, 'id' | 'dataUtworzenia'>): Promise<Historyjka> {
+    const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
     const newStory: Historyjka = {
       ...story,
-      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+      id,
       dataUtworzenia: new Date().toISOString(),
     };
-    stories.push(newStory);
-    this.saveStoriesToStorage(stories);
+
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, STORIES_KEY, id), newStory);
+    } else {
+      const stories = await this.getAll();
+      stories.push(newStory);
+      await this.saveStoriesToStorage(stories);
+    }
     return newStory;
   }
 
-  update(updatedStory: Historyjka): Historyjka {
-    const stories = this.getStoriesFromStorage();
-    const index = stories.findIndex((s) => s.id === updatedStory.id);
-    if (index !== -1) {
-      stories[index] = updatedStory;
-      this.saveStoriesToStorage(stories);
+  async update(updatedStory: Historyjka): Promise<Historyjka> {
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, STORIES_KEY, updatedStory.id), updatedStory);
+    } else {
+      const stories = await this.getAll();
+      const index = stories.findIndex((s) => s.id === updatedStory.id);
+      if (index !== -1) {
+        stories[index] = updatedStory;
+        await this.saveStoriesToStorage(stories);
+      }
     }
     return updatedStory;
   }
 
-  delete(id: string): void {
-    const stories = this.getStoriesFromStorage();
-    const filteredStories = stories.filter((s) => s.id !== id);
-    this.saveStoriesToStorage(filteredStories);
+  async delete(id: string): Promise<void> {
+    if (STORAGE_MODE === 'firebase') {
+      await deleteDoc(doc(db, STORIES_KEY, id));
+    } else {
+      const stories = await this.getAll();
+      const filteredStories = stories.filter((s) => s.id !== id);
+      await this.saveStoriesToStorage(filteredStories);
+    }
   }
 
-  updateState(id: string, newState: 'todo' | 'doing' | 'done'): void {
-    const story = this.getById(id);
+  async updateState(id: string, newState: 'todo' | 'doing' | 'done'): Promise<void> {
+    const story = await this.getById(id);
     if (story) {
-      this.update({ ...story, stan: newState });
+      await this.update({ ...story, stan: newState });
     }
   }
 }
 
-export const projectService = new ProjectService();
 export const storyService = new StoryService();
 
 export class TaskService {
-  private getTasksFromStorage(): Zadanie[] {
-    const data = localStorage.getItem(TASKS_KEY);
-    return data ? JSON.parse(data) : [];
+  async getAll(): Promise<Zadanie[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const querySnapshot = await getDocs(collection(db, TASKS_KEY));
+      return querySnapshot.docs.map(doc => doc.data() as Zadanie);
+    } else {
+      const data = localStorage.getItem(TASKS_KEY);
+      return data ? JSON.parse(data) : [];
+    }
   }
 
-  private saveTasksToStorage(tasks: Zadanie[]): void {
+  private async saveTasksToStorage(tasks: Zadanie[]): Promise<void> {
     localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
   }
 
-  getAllForStory(storyId: string): Zadanie[] {
-    return this.getTasksFromStorage().filter((t) => t.historyjkaId === storyId);
+  async getAllForStory(storyId: string): Promise<Zadanie[]> {
+    if (STORAGE_MODE === 'firebase') {
+      const q = query(collection(db, TASKS_KEY), where("historyjkaId", "==", storyId));
+      const querySnapshot = await getDocs(q);
+      return querySnapshot.docs.map(doc => doc.data() as Zadanie);
+    } else {
+      const all = await this.getAll();
+      return all.filter((t) => t.historyjkaId === storyId);
+    }
   }
 
-  getById(id: string): Zadanie | undefined {
-    return this.getTasksFromStorage().find((t) => t.id === id);
+  async getById(id: string): Promise<Zadanie | undefined> {
+    if (STORAGE_MODE === 'firebase') {
+      const docRef = doc(db, TASKS_KEY, id);
+      const docSnap = await getDoc(docRef);
+      return docSnap.exists() ? docSnap.data() as Zadanie : undefined;
+    } else {
+      const all = await this.getAll();
+      return all.find((t) => t.id === id);
+    }
   }
 
-  create(task: Omit<Zadanie, 'id' | 'dataDodania'>): Zadanie {
-    const tasks = this.getTasksFromStorage();
+  async create(task: Omit<Zadanie, 'id' | 'dataDodania'>): Promise<Zadanie> {
+    const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
     const newTask: Zadanie = {
       ...task,
-      id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11),
+      id,
       dataDodania: new Date().toISOString(),
     };
-    tasks.push(newTask);
-    this.saveTasksToStorage(tasks);
+
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, TASKS_KEY, id), newTask);
+    } else {
+      const tasks = await this.getAll();
+      tasks.push(newTask);
+      await this.saveTasksToStorage(tasks);
+    }
 
     // Notification Logic: New task for story owner
-    const story = storyService.getById(newTask.historyjkaId);
+    const story = await storyService.getById(newTask.historyjkaId);
     if (story) {
-      notificationService.create({
+      await notificationService.create({
         tytul: 'Nowe zadanie w historyjce',
         tresc: `Dodano zadanie "${newTask.nazwa}" do Twojej historyjki "${story.nazwa}"`,
         priorytet: 'medium',
@@ -338,17 +479,15 @@ export class TaskService {
     return newTask;
   }
 
-  update(updatedTask: Zadanie): Zadanie {
-    const tasks = this.getTasksFromStorage();
-    const index = tasks.findIndex((t) => t.id === updatedTask.id);
-    if (index === -1) return updatedTask;
+  async update(updatedTask: Zadanie): Promise<Zadanie> {
+    const oldTask = await this.getById(updatedTask.id);
+    if (!oldTask) return updatedTask;
 
-    const oldTask = tasks[index];
     const finalTask = { ...updatedTask };
 
     // Notification Logic: Task assignment
     if (finalTask.wlascicielId && finalTask.wlascicielId !== oldTask.wlascicielId) {
-      notificationService.create({
+      await notificationService.create({
         tytul: 'Przypisano zadanie',
         tresc: `Zostałeś przypisany do zadania: ${finalTask.nazwa}`,
         priorytet: 'high',
@@ -358,24 +497,25 @@ export class TaskService {
 
     // Business Logic: Assigning user (devops/developer) to a 'todo' task
     if (finalTask.wlascicielId && finalTask.stan === 'todo' && oldTask.stan === 'todo') {
-      const user = userService.getAll().find(u => u.id === finalTask.wlascicielId);
+      const users = await userService.getAll();
+      const user = users.find(u => u.id === finalTask.wlascicielId);
       if (user && (user.rola === 'developer' || user.rola === 'devops')) {
         finalTask.stan = 'doing';
         finalTask.dataStartu = new Date().toISOString();
         
         // Propagate to Story
-        const story = storyService.getById(finalTask.historyjkaId);
+        const story = await storyService.getById(finalTask.historyjkaId);
         if (story && story.stan === 'todo') {
-          storyService.updateState(story.id, 'doing');
+          await storyService.updateState(story.id, 'doing');
         }
       }
     }
 
     // Business Logic & Notifications: State changes
     if (finalTask.stan !== oldTask.stan) {
-      const story = storyService.getById(finalTask.historyjkaId);
+      const story = await storyService.getById(finalTask.historyjkaId);
       if (story) {
-        notificationService.create({
+        await notificationService.create({
           tytul: 'Zmiana statusu zadania',
           tresc: `Zadanie "${finalTask.nazwa}" zmieniło stan na "${finalTask.stan}"`,
           priorytet: finalTask.stan === 'done' ? 'medium' : 'low',
@@ -387,34 +527,44 @@ export class TaskService {
         finalTask.dataZakonczenia = new Date().toISOString();
         
         // Propagate to Story if all tasks are done
-        setTimeout(() => {
-          const allStoryTasks = this.getAllForStory(finalTask.historyjkaId);
-          const otherTasks = allStoryTasks.filter(t => t.id !== finalTask.id);
-          const allDone = otherTasks.every(t => t.stan === 'done');
-          
-          if (allDone) {
-            storyService.updateState(finalTask.historyjkaId, 'done');
-          }
-        }, 0);
+        const allStoryTasks = await this.getAllForStory(finalTask.historyjkaId);
+        const otherTasks = allStoryTasks.filter(t => t.id !== finalTask.id);
+        const allDone = otherTasks.every(t => t.stan === 'done');
+        
+        if (allDone) {
+          await storyService.updateState(finalTask.historyjkaId, 'done');
+        }
       }
     }
 
-    tasks[index] = finalTask;
-    this.saveTasksToStorage(tasks);
+    if (STORAGE_MODE === 'firebase') {
+      await setDoc(doc(db, TASKS_KEY, finalTask.id), finalTask);
+    } else {
+      const tasks = await this.getAll();
+      const index = tasks.findIndex((t) => t.id === finalTask.id);
+      if (index !== -1) {
+        tasks[index] = finalTask;
+        await this.saveTasksToStorage(tasks);
+      }
+    }
     return finalTask;
   }
 
-  delete(id: string): void {
-    const tasks = this.getTasksFromStorage();
-    const taskToDelete = tasks.find(t => t.id === id);
-    const filteredTasks = tasks.filter((t) => t.id !== id);
-    this.saveTasksToStorage(filteredTasks);
+  async delete(id: string): Promise<void> {
+    const taskToDelete = await this.getById(id);
+    if (STORAGE_MODE === 'firebase') {
+      await deleteDoc(doc(db, TASKS_KEY, id));
+    } else {
+      const tasks = await this.getAll();
+      const filteredTasks = tasks.filter((t) => t.id !== id);
+      await this.saveTasksToStorage(filteredTasks);
+    }
 
     // Notification Logic: Task deletion
     if (taskToDelete) {
-      const story = storyService.getById(taskToDelete.historyjkaId);
+      const story = await storyService.getById(taskToDelete.historyjkaId);
       if (story) {
-        notificationService.create({
+        await notificationService.create({
           tytul: 'Usunięto zadanie',
           tresc: `Zadanie "${taskToDelete.nazwa}" zostało usunięte z historyjki "${story.nazwa}"`,
           priorytet: 'medium',
