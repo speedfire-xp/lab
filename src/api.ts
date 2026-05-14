@@ -1,16 +1,5 @@
-import { 
-  collection, 
-  getDocs, 
-  getDoc, 
-  doc, 
-  setDoc, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  where 
-} from 'firebase/firestore';
-import { db } from './firebase';
-import { STORAGE_MODE } from './config';
+import { dbInstance } from './database';
+import type { MyStorage } from './config';
 import type { Projekt, Uzytkownik, Historyjka, Zadanie, Powiadomienie, Rola } from './types';
 
 const PROJECTS_KEY = 'manageme_projects';
@@ -21,7 +10,7 @@ const USERS_KEY = 'manageme_users';
 const LOGGED_USER_KEY = 'manageme_logged_user';
 const ACTIVE_PROJECT_KEY = 'manageme_active_project';
 
-const SUPER_ADMIN_EMAIL = 'admin@manageme.com';
+const SUPER_ADMIN_EMAIL = 'speedfirexp@gmail.com';
 
 export const getActiveProjectId = (): string | null => {
   return localStorage.getItem(ACTIVE_PROJECT_KEY);
@@ -50,18 +39,16 @@ class NotificationEmitter {
 export const notificationEmitter = new NotificationEmitter();
 
 export class UserService {
-  async getAll(): Promise<Uzytkownik[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const querySnapshot = await getDocs(collection(db, USERS_KEY));
-      return querySnapshot.docs.map(doc => doc.data() as Uzytkownik);
-    } else {
-      const data = localStorage.getItem(USERS_KEY);
-      return data ? JSON.parse(data) : [];
-    }
+  private storage: MyStorage;
+  private collection: string;
+
+  constructor(storage: MyStorage, collection: string) {
+    this.storage = storage;
+    this.collection = collection;
   }
 
-  private async saveAll(users: Uzytkownik[]): Promise<void> {
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  async getAll(): Promise<Uzytkownik[]> {
+    return this.storage.list<Uzytkownik>(this.collection);
   }
 
   async getByEmail(email: string): Promise<Uzytkownik | undefined> {
@@ -70,58 +57,32 @@ export class UserService {
   }
 
   async create(user: Uzytkownik): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, USERS_KEY, user.id), user);
-    } else {
-      const users = await this.getAll();
-      users.push(user);
-      await this.saveAll(users);
-    }
+    await this.storage.create(this.collection, user);
 
     // Notify admins about new user
     const users = await this.getAll();
-    users.filter(u => u.rola === 'admin').forEach(async (admin) => {
+    const admins = users.filter(u => u.rola === 'admin');
+    for (const admin of admins) {
       await notificationService.create({
         tytul: 'Nowe konto w systemie',
         tresc: `Zarejestrowano nowego użytkownika: ${user.email}`,
         priorytet: 'high',
         odbiorcaId: admin.id
       });
-    });
+    }
   }
 
   async updateRole(userId: string, role: Rola): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      await updateDoc(doc(db, USERS_KEY, userId), { rola: role });
-    } else {
-      const users = await this.getAll();
-      const index = users.findIndex(u => u.id === userId);
-      if (index !== -1) {
-        users[index].rola = role;
-        await this.saveAll(users);
-      }
-    }
+    await this.storage.update(this.collection, userId, { rola: role });
   }
 
   async toggleBlock(userId: string): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      const users = await this.getAll();
-      const user = users.find(u => u.id === userId);
-      if (user) {
-        await updateDoc(doc(db, USERS_KEY, userId), { czyZablokowany: !user.czyZablokowany });
-      }
-    } else {
-      const users = await this.getAll();
-      const index = users.findIndex(u => u.id === userId);
-      if (index !== -1) {
-        users[index].czyZablokowany = !users[index].czyZablokowany;
-        await this.saveAll(users);
-      }
+    const user = await this.storage.get<Uzytkownik>(this.collection, userId);
+    if (user) {
+      await this.storage.update(this.collection, userId, { czyZablokowany: !user.czyZablokowany });
     }
   }
 }
-
-export const userService = new UserService();
 
 export class AuthService {
   async getLoggedUser(): Promise<Uzytkownik | null> {
@@ -158,36 +119,20 @@ export class AuthService {
   }
 }
 
-export const authService = new AuthService();
-
 export class NotificationService {
-  private async getNotificationsFromStorage(): Promise<Powiadomienie[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const querySnapshot = await getDocs(collection(db, NOTIFICATIONS_KEY));
-      return querySnapshot.docs.map(doc => doc.data() as Powiadomienie);
-    } else {
-      const data = localStorage.getItem(NOTIFICATIONS_KEY);
-      return data ? JSON.parse(data) : [];
-    }
-  }
+  private storage: MyStorage;
+  private collection: string;
 
-  private async saveNotificationsToStorage(notifications: Powiadomienie[]): Promise<void> {
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications));
+  constructor(storage: MyStorage, collection: string) {
+    this.storage = storage;
+    this.collection = collection;
   }
 
   async getAllForUser(userId: string): Promise<Powiadomienie[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const q = query(collection(db, NOTIFICATIONS_KEY), where("odbiorcaId", "==", userId));
-      const querySnapshot = await getDocs(q);
-      return querySnapshot.docs
-        .map(doc => doc.data() as Powiadomienie)
-        .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
-    } else {
-      const all = await this.getNotificationsFromStorage();
-      return all
-        .filter((n) => n.odbiorcaId === userId)
-        .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
-    }
+    const all = await this.storage.list<Powiadomienie>(this.collection);
+    return all
+      .filter((n) => n.odbiorcaId === userId)
+      .sort((a, b) => new Date(b.data).getTime() - new Date(a.data).getTime());
   }
 
   async getUnreadCount(userId: string): Promise<number> {
@@ -204,29 +149,13 @@ export class NotificationService {
       czyPrzeczytane: false,
     };
 
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, NOTIFICATIONS_KEY, id), newNotification);
-    } else {
-      const notifications = await this.getNotificationsFromStorage();
-      notifications.push(newNotification);
-      await this.saveNotificationsToStorage(notifications);
-    }
-
+    await this.storage.create(this.collection, newNotification);
     notificationEmitter.emit(newNotification);
     return newNotification;
   }
 
   async markAsRead(id: string): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      await updateDoc(doc(db, NOTIFICATIONS_KEY, id), { czyPrzeczytane: true });
-    } else {
-      const notifications = await this.getNotificationsFromStorage();
-      const index = notifications.findIndex((n) => n.id === id);
-      if (index !== -1) {
-        notifications[index].czyPrzeczytane = true;
-        await this.saveNotificationsToStorage(notifications);
-      }
-    }
+    await this.storage.update(this.collection, id, { czyPrzeczytane: true });
   }
 
   async markAllAsRead(userId: string): Promise<void> {
@@ -239,125 +168,77 @@ export class NotificationService {
   }
 }
 
-export const notificationService = new NotificationService();
-
 export class ProjectService {
-  async getAll(): Promise<Projekt[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const querySnapshot = await getDocs(collection(db, PROJECTS_KEY));
-      return querySnapshot.docs.map(doc => doc.data() as Projekt);
-    } else {
-      const data = localStorage.getItem(PROJECTS_KEY);
-      return data ? JSON.parse(data) : [];
-    }
+  private storage: MyStorage;
+  private collection: string;
+
+  constructor(storage: MyStorage, collection: string) {
+    this.storage = storage;
+    this.collection = collection;
   }
 
-  private async saveProjectsToStorage(projects: Projekt[]): Promise<void> {
-    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  async getAll(): Promise<Projekt[]> {
+    return this.storage.list<Projekt>(this.collection);
   }
 
   async getById(id: string): Promise<Projekt | undefined> {
-    if (STORAGE_MODE === 'firebase') {
-      const docRef = doc(db, PROJECTS_KEY, id);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? docSnap.data() as Projekt : undefined;
-    } else {
-      const projects = await this.getAll();
-      return projects.find((p) => p.id === id);
-    }
+    return this.storage.get<Projekt>(this.collection, id);
   }
 
   async create(projekt: Omit<Projekt, 'id'>): Promise<Projekt> {
     const id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11);
     const newProject: Projekt = { ...projekt, id };
 
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, PROJECTS_KEY, id), newProject);
-    } else {
-      const projects = await this.getAll();
-      projects.push(newProject);
-      await this.saveProjectsToStorage(projects);
-    }
+    await this.storage.create(this.collection, newProject);
 
     // Notification Logic: New project for all admins
     const users = await userService.getAll();
-    users.filter(u => u.rola === 'admin').forEach(async (admin) => {
+    const admins = users.filter(u => u.rola === 'admin');
+    for (const admin of admins) {
       await notificationService.create({
         tytul: 'Nowy Projekt',
         tresc: `Utworzono nowy projekt: ${newProject.nazwa}`,
         priorytet: 'high',
         odbiorcaId: admin.id
       });
-    });
+    }
 
     return newProject;
   }
 
   async update(updatedProject: Projekt): Promise<Projekt> {
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, PROJECTS_KEY, updatedProject.id), updatedProject);
-    } else {
-      const projects = await this.getAll();
-      const index = projects.findIndex((p) => p.id === updatedProject.id);
-      if (index !== -1) {
-        projects[index] = updatedProject;
-        await this.saveProjectsToStorage(projects);
-      }
-    }
+    await this.storage.update(this.collection, updatedProject.id, updatedProject);
     return updatedProject;
   }
 
   async delete(id: string): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      await deleteDoc(doc(db, PROJECTS_KEY, id));
-    } else {
-      const projects = await this.getAll();
-      const filteredProjects = projects.filter((p) => p.id !== id);
-      await this.saveProjectsToStorage(filteredProjects);
-    }
+    await this.storage.delete(this.collection, id);
     if (getActiveProjectId() === id) {
       setActiveProjectId(null);
     }
   }
 }
 
-export const projectService = new ProjectService();
-
 export class StoryService {
-  async getAll(): Promise<Historyjka[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const querySnapshot = await getDocs(collection(db, STORIES_KEY));
-      return querySnapshot.docs.map(doc => doc.data() as Historyjka);
-    } else {
-      const data = localStorage.getItem(STORIES_KEY);
-      return data ? JSON.parse(data) : [];
-    }
+  private storage: MyStorage;
+  private collection: string;
+
+  constructor(storage: MyStorage, collection: string) {
+    this.storage = storage;
+    this.collection = collection;
   }
 
-  private async saveStoriesToStorage(stories: Historyjka[]): Promise<void> {
-    localStorage.setItem(STORIES_KEY, JSON.stringify(stories));
+  async getAll(): Promise<Historyjka[]> {
+    return this.storage.list<Historyjka>(this.collection);
   }
 
   async getAllForProject(projectId: string): Promise<Historyjka[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const q = query(collection(db, STORIES_KEY), where("projektId", "==", projectId));
-      const querySnapshot = await getDocs(q);
-      return querySnapshot.docs.map(doc => doc.data() as Historyjka);
-    } else {
-      const all = await this.getAll();
-      return all.filter((s) => s.projektId === projectId);
-    }
+    const all = await this.getAll();
+    return all.filter((s) => s.projektId === projectId);
   }
 
   async getById(id: string): Promise<Historyjka | undefined> {
-    if (STORAGE_MODE === 'firebase') {
-      const docRef = doc(db, STORIES_KEY, id);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? docSnap.data() as Historyjka : undefined;
-    } else {
-      const all = await this.getAll();
-      return all.find((s) => s.id === id);
-    }
+    return this.storage.get<Historyjka>(this.collection, id);
   }
 
   async create(story: Omit<Historyjka, 'id' | 'dataUtworzenia'>): Promise<Historyjka> {
@@ -368,38 +249,17 @@ export class StoryService {
       dataUtworzenia: new Date().toISOString(),
     };
 
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, STORIES_KEY, id), newStory);
-    } else {
-      const stories = await this.getAll();
-      stories.push(newStory);
-      await this.saveStoriesToStorage(stories);
-    }
+    await this.storage.create(this.collection, newStory);
     return newStory;
   }
 
   async update(updatedStory: Historyjka): Promise<Historyjka> {
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, STORIES_KEY, updatedStory.id), updatedStory);
-    } else {
-      const stories = await this.getAll();
-      const index = stories.findIndex((s) => s.id === updatedStory.id);
-      if (index !== -1) {
-        stories[index] = updatedStory;
-        await this.saveStoriesToStorage(stories);
-      }
-    }
+    await this.storage.update(this.collection, updatedStory.id, updatedStory);
     return updatedStory;
   }
 
   async delete(id: string): Promise<void> {
-    if (STORAGE_MODE === 'firebase') {
-      await deleteDoc(doc(db, STORIES_KEY, id));
-    } else {
-      const stories = await this.getAll();
-      const filteredStories = stories.filter((s) => s.id !== id);
-      await this.saveStoriesToStorage(filteredStories);
-    }
+    await this.storage.delete(this.collection, id);
   }
 
   async updateState(id: string, newState: 'todo' | 'doing' | 'done'): Promise<void> {
@@ -410,43 +270,26 @@ export class StoryService {
   }
 }
 
-export const storyService = new StoryService();
-
 export class TaskService {
-  async getAll(): Promise<Zadanie[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const querySnapshot = await getDocs(collection(db, TASKS_KEY));
-      return querySnapshot.docs.map(doc => doc.data() as Zadanie);
-    } else {
-      const data = localStorage.getItem(TASKS_KEY);
-      return data ? JSON.parse(data) : [];
-    }
+  private storage: MyStorage;
+  private collection: string;
+
+  constructor(storage: MyStorage, collection: string) {
+    this.storage = storage;
+    this.collection = collection;
   }
 
-  private async saveTasksToStorage(tasks: Zadanie[]): Promise<void> {
-    localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
+  async getAll(): Promise<Zadanie[]> {
+    return this.storage.list<Zadanie>(this.collection);
   }
 
   async getAllForStory(storyId: string): Promise<Zadanie[]> {
-    if (STORAGE_MODE === 'firebase') {
-      const q = query(collection(db, TASKS_KEY), where("historyjkaId", "==", storyId));
-      const querySnapshot = await getDocs(q);
-      return querySnapshot.docs.map(doc => doc.data() as Zadanie);
-    } else {
-      const all = await this.getAll();
-      return all.filter((t) => t.historyjkaId === storyId);
-    }
+    const all = await this.getAll();
+    return all.filter((t) => t.historyjkaId === storyId);
   }
 
   async getById(id: string): Promise<Zadanie | undefined> {
-    if (STORAGE_MODE === 'firebase') {
-      const docRef = doc(db, TASKS_KEY, id);
-      const docSnap = await getDoc(docRef);
-      return docSnap.exists() ? docSnap.data() as Zadanie : undefined;
-    } else {
-      const all = await this.getAll();
-      return all.find((t) => t.id === id);
-    }
+    return this.storage.get<Zadanie>(this.collection, id);
   }
 
   async create(task: Omit<Zadanie, 'id' | 'dataDodania'>): Promise<Zadanie> {
@@ -457,13 +300,7 @@ export class TaskService {
       dataDodania: new Date().toISOString(),
     };
 
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, TASKS_KEY, id), newTask);
-    } else {
-      const tasks = await this.getAll();
-      tasks.push(newTask);
-      await this.saveTasksToStorage(tasks);
-    }
+    await this.storage.create(this.collection, newTask);
 
     // Notification Logic: New task for story owner
     const story = await storyService.getById(newTask.historyjkaId);
@@ -537,28 +374,13 @@ export class TaskService {
       }
     }
 
-    if (STORAGE_MODE === 'firebase') {
-      await setDoc(doc(db, TASKS_KEY, finalTask.id), finalTask);
-    } else {
-      const tasks = await this.getAll();
-      const index = tasks.findIndex((t) => t.id === finalTask.id);
-      if (index !== -1) {
-        tasks[index] = finalTask;
-        await this.saveTasksToStorage(tasks);
-      }
-    }
+    await this.storage.update(this.collection, finalTask.id, finalTask);
     return finalTask;
   }
 
   async delete(id: string): Promise<void> {
     const taskToDelete = await this.getById(id);
-    if (STORAGE_MODE === 'firebase') {
-      await deleteDoc(doc(db, TASKS_KEY, id));
-    } else {
-      const tasks = await this.getAll();
-      const filteredTasks = tasks.filter((t) => t.id !== id);
-      await this.saveTasksToStorage(filteredTasks);
-    }
+    await this.storage.delete(this.collection, id);
 
     // Notification Logic: Task deletion
     if (taskToDelete) {
@@ -575,4 +397,9 @@ export class TaskService {
   }
 }
 
-export const taskService = new TaskService();
+export const userService = new UserService(dbInstance, USERS_KEY);
+export const authService = new AuthService();
+export const notificationService = new NotificationService(dbInstance, NOTIFICATIONS_KEY);
+export const projectService = new ProjectService(dbInstance, PROJECTS_KEY);
+export const storyService = new StoryService(dbInstance, STORIES_KEY);
+export const taskService = new TaskService(dbInstance, TASKS_KEY);

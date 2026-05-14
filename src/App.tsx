@@ -324,8 +324,18 @@ function App() {
   const handleTaskAssignUser = async (taskId: string, userId: string) => {
     const task = await taskService.getById(taskId);
     if (task) {
+      // 1. Wysyłamy aktualizację do bazy
       await taskService.update({ ...task, wlascicielId: userId });
-      if (selectedStoryId) await refreshTasks(selectedStoryId);
+      
+      // 2. Wymuszamy pełne odświeżenie Zadań i Historyjek z lekkim opóźnieniem
+      setTimeout(async () => {
+        if (activeProjectId) {
+          await refreshStories(activeProjectId);
+        }
+        if (selectedStoryId) {
+          await refreshTasks(selectedStoryId);
+        }
+      }, 300); // 300ms to idealny czas dla Firebase na zsynchronizowanie danych
     }
   };
 
